@@ -1,0 +1,39 @@
+# dependencies
+/node_modules
+**/node_modules
+/oh_modules
+**/oh_modules
+
+# local config / secrets
+/local.properties
+*.local
+.env
+.env.*
+
+# IDE
+/.idea
+**/.idea
+*.iml
+.vscode/
+.DS_Store
+
+# HarmonyOS build artifacts
+**/build
+/.hvigor
+**/.hvigor
+/.cxx
+**/.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+**/.preview
+**/.cache
+
+# logs / temp
+*.log
+*.tmp
+*.swp
+*.bak
+*~

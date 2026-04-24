@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>Nebula · Hand Tracking</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    overflow: hidden;
+    background: #0a0a0c;
+    color: #fafafa;
+    font-family: Inter, system-ui, sans-serif;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+  }
+  #cam, #overlay {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    object-fit: cover;
+    pointer-events: none;
+  }
+  #cam { z-index: 1; transform: scaleX(-1); }  /* mirror self-view */
+  #overlay { z-index: 2; }
+  #status {
+    position: fixed;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    background: rgba(24,24,27,0.85);
+    border: 1px solid rgba(39,39,42,0.9);
+    border-radius: 999px;
+    color: #fafafa;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    z-index: 10;
+  }
+  #err {
+    position: fixed;
+    left: 16px; right: 16px; bottom: 16px;
+    padding: 10px 14px;
+    background: rgba(200,40,40,0.85);
+    border-radius: 12px;
+    font-size: 12px;
+    color: #fff;
+    z-index: 12;
+    display: none;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<video id="cam" autoplay muted playsinline></video>
+<canvas id="overlay"></canvas>
+<div id="status">HAND TRACKING · STARTING…</div>
+<div id="err"></div>
+<script>
+(function () {
+  const statusEl = document.getElementById('status');
+  const errEl = document.getElementById('err');
+  function setStatus(s) { statusEl.textContent = s; }
+  function fail(msg) {
+    errEl.style.display = 'block';
+    errEl.textContent = msg;
+    try { console.error('[hand] ' + msg); } catch (_) {}
+    bridgePush(0, 0, false);
+  }
+  window.addEventListener('error', e => fail('err: ' + e.message));
+  window.addEventListener('unhandledrejection', e => fail('rej: ' + String(e.reason)));
+
+  /* Bridge to ArkTS. The page is loaded by Workshop.ets with a
+     javaScriptProxy registered under window.handBridge, exposing
+     two methods:
+       onHands(count, distance, stable)  — explode value
+       onHandGrab(active, x, y)          — drag state + hand centre
+  */
+  let bridgeTickCount = 0;
+  let bridgeFailures = 0;
+  function bridgePush(count, distance, stable) {
+    bridgeTickCount++;
+    if (bridgeTickCount % 30 === 1) {
+      try {
+        console.log('[hand] t#' + bridgeTickCount
+          + ' bridge=' + (window.handBridge ? 'OK' : 'MISSING')
+          + ' count=' + count + ' d=' + distance.toFixed(3)
+          + ' fails=' + bridgeFailures);
+      } catch (_) {}
+    }
+    try {
+      if (window.handBridge && typeof window.handBridge.onHands === 'function') {
+        window.handBridge.onHands(count | 0, +distance, !!stable);
+      } else {
+        bridgeFailures++;
+      }
+    } catch (e) {
+      bridgeFailures++;
+      try { console.error('[hand] bridge threw: ' + e.message); } catch (_) {}
+    }
+  }
+
+  function bridgeGrab(active, x, y) {
+    try {
+      if (window.handBridge && typeof window.handBridge.onHandGrab === 'function') {
+        window.handBridge.onHandGrab(!!active, +x, +y);
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Fist detection — all 5 fingertips near the palm centre (landmark 9,
+   * middle-finger MCP). Normalised by the wrist→middle-tip span so the
+   * threshold stays sensible at any hand distance from the camera.
+   */
+  function isFist(lms) {
+    const palm = lms[9];
+    const tips = [4, 8, 12, 16, 20];
+    let total = 0;
+    for (const t of tips) {
+      const dx = lms[t].x - palm.x;
+      const dy = lms[t].y - palm.y;
+      total += Math.sqrt(dx*dx + dy*dy);
+    }
+    const avg = total / tips.length;
+    const wristToTip = Math.sqrt(
+      (lms[12].x - lms[0].x) ** 2 + (lms[12].y - lms[0].y) ** 2
+    );
+    if (wristToTip < 0.01) return false;
+    return (avg / wristToTip) < 0.45;
+  }
+
+  /* Load MediaPipe Hands from jsdelivr. Fallback to unpkg.  */
+  const CDN_ROOTS = [
+    'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/',
+    'https://unpkg.com/@mediapipe/hands@0.4.1675469240/'
+  ];
+
+  function loadScript(url) {
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.crossOrigin = 'anonymous';
+      s.onload = res;
+      s.onerror = () => rej(new Error('script fail: ' + url));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureHands() {
+    if (window.Hands) return CDN_ROOTS[0];
+    for (const root of CDN_ROOTS) {
+      try {
+        await loadScript(root + 'hands.js');
+        if (window.Hands) return root;
+      } catch (e) { console.warn(e.message); }
+    }
+    throw new Error('MediaPipe Hands library unreachable on every CDN');
+  }
+
+  let activeStream = null;
+
+  // Single attempt to acquire + start the preview. Separates the two
+  // failure modes (getUserMedia rejected vs. metadata/play hung) and
+  // applies an explicit 4s timeout around the metadata wait so a stuck
+  // camera handshake doesn't block forever.
+  // `constraintsMode`:
+  //   'front-640' — facingMode=user + 640x480 (ideal for MediaPipe lite)
+  //   'front-any' — facingMode=user only (let driver pick size)
+  //   'any-640'   — no facingMode, 640x480
+  //   'any'       — pure {video: true} — last resort, takes whatever
+  //                 the camera service is willing to hand us
+  async function startCameraOnce(constraintsMode) {
+    const video = document.getElementById('cam');
+    let constraints;
+    if (constraintsMode === 'front-640') {
+      constraints = { video: { facingMode: 'user', width: 640, height: 480 }, audio: false };
+    } else if (constraintsMode === 'front-any') {
+      constraints = { video: { facingMode: 'user' }, audio: false };
+    } else if (constraintsMode === 'any-640') {
+      constraints = { video: { width: 640, height: 480 }, audio: false };
+    } else {
+      constraints = { video: true, audio: false };
+    }
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    // Release the previous stream (if any) before assigning — prevents
+    // the ArkWeb WebView from holding two sessions and immediately
+    // shutting one down.
+    if (activeStream) {
+      try { for (const t of activeStream.getTracks()) t.stop(); } catch (_) {}
+    }
+    activeStream = stream;
+    video.srcObject = stream;
+    // Timeout-guarded metadata wait. Real devices settle in < 500ms;
+    // if this takes more than 4s the handshake is broken and we should
+    // release + retry rather than hang forever.
+    await Promise.race([
+      new Promise(res => { video.onloadedmetadata = res; }),
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error('video metadata timeout')), 4000))
+    ]);
+    await video.play();
+    return video;
+  }
+
+  // Retry ladder — the ArkWeb WebView / HarmonyOS camera stack
+  // occasionally returns "Timeout starting video source" or hcamera
+  // error 15 on the first getUserMedia. Causes in practice:
+  //   a. a previous consumer (CameraPreview, prior hand.html mount)
+  //      just released the hardware and the kernel handoff isn't done
+  //   b. the driver can't honour the exact constraints (facingMode +
+  //      640x480) — error 15 literally means "unsupported config"
+  //
+  // The plan walks through progressively looser constraints AND adds
+  // delays between attempts so transient occupancy has time to clear.
+  // The final step is pure `{video: true}` — takes whatever the
+  // service is willing to hand out, MediaPipe copes with any size.
+  async function startCamera() {
+    const plan = [
+      { delayMs:   0, mode: 'front-640' },
+      { delayMs: 400, mode: 'front-any' },  // drop size hint
+      { delayMs: 900, mode: 'any-640'   },  // drop front-cam hint
+      { delayMs: 1800, mode: 'any'      }   // pure {video: true}
+    ];
+    let lastErr = null;
+    for (let i = 0; i < plan.length; i++) {
+      const step = plan[i];
+      if (step.delayMs > 0) {
+        setStatus('CAMERA RETRY ' + (i + 1) + '/' + plan.length + ' (' + step.mode + ')…');
+        await new Promise(r => setTimeout(r, step.delayMs));
+      }
+      try {
+        return await startCameraOnce(step.mode);
+      } catch (e) {
+        lastErr = e;
+        try {
+          console.warn('[hand] camera attempt ' + (i + 1) +
+            ' (' + step.mode + ') failed: ' +
+            (e && e.message ? e.message : String(e)));
+        } catch (_) {}
+        // Let any half-opened stream drop before the next attempt.
+        try {
+          if (activeStream) {
+            for (const t of activeStream.getTracks()) t.stop();
+            activeStream = null;
+          }
+        } catch (_) {}
+      }
+    }
+    throw lastErr || new Error('camera unreachable after 4 attempts');
+  }
+
+  // Explicit cleanup when the hosting Web component unmounts. MediaPipe
+  // can leak the stream otherwise, preventing ArkTS CameraPreview from
+  // re-acquiring the hardware on return.
+  function releaseCamera() {
+    try {
+      if (activeStream) {
+        for (const t of activeStream.getTracks()) t.stop();
+        activeStream = null;
+      }
+      const v = document.getElementById('cam');
+      if (v) v.srcObject = null;
+      try { console.log('[hand] releaseCamera done'); } catch (_) {}
+    } catch (_) {}
+  }
+  // Expose so Workshop.ets can call it via `runJavaScript('releaseCamera()')`
+  // right before ArkUI unmounts the WebView. pagehide alone isn't reliable
+  // under conditional re-renders.
+  window.releaseCamera = releaseCamera;
+  window.addEventListener('pagehide', releaseCamera);
+  window.addEventListener('beforeunload', releaseCamera);
+
+  function resizeOverlay() {
+    const c = document.getElementById('overlay');
+    // Match device pixel ratio so the landmark dots and skeleton lines
+    // stay crisp on high-DPI phone screens. The canvas's CSS size still
+    // occupies 100vw/100vh (set by the stylesheet) so coordinates in
+    // drawOverlay() that use c.width/c.height keep working.
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    c.width = Math.round(window.innerWidth * dpr);
+    c.height = Math.round(window.innerHeight * dpr);
+    const ctx = c.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);  // reset any prior scale
+    ctx.scale(dpr, dpr);
+    // Keep a normalised "logical" size drawOverlay can use so joint
+    // radii stay the same in CSS pixels regardless of DPR.
+    c.__logicalW = window.innerWidth;
+    c.__logicalH = window.innerHeight;
+  }
+  window.addEventListener('resize', resizeOverlay);
+  resizeOverlay();
+
+  function drawOverlay(results) {
+    const c = document.getElementById('overlay');
+    const ctx = c.getContext('2d');
+    // Use CSS-pixel logical size (canvas transform is pre-scaled by DPR).
+    const W = c.__logicalW || c.width;
+    const H = c.__logicalH || c.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!results.multiHandLandmarks) return;
+    // 21 MediaPipe landmarks per hand. Dots are bigger (was r=3.2 which
+    // was invisible on high-DPI phone screens), with a white ring around
+    // each so they pop against any background (splat scenes, camera
+    // passthrough, dark/light garments, etc).
+    const JOINT_R = 8;           // fill radius (CSS px)
+    const JOINT_RING = 2.5;      // extra white stroke around each joint
+    const BONE_W = 4;            // skeleton line thickness
+    const bones = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+                   [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],
+                   [15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+    for (const lms of results.multiHandLandmarks) {
+      // --- bones first so joints cover their endpoints ---
+      // White halo under the colored bone so it's visible on any scene.
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = BONE_W + 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (const pair of bones) {
+        const a = lms[pair[0]], b = lms[pair[1]];
+        const ax = (1 - a.x) * W, ay = a.y * H;
+        const bx = (1 - b.x) * W, by = b.y * H;
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+      // Brand-orange inner bone.
+      ctx.strokeStyle = '#FF4D33';
+      ctx.lineWidth = BONE_W;
+      ctx.beginPath();
+      for (const pair of bones) {
+        const a = lms[pair[0]], b = lms[pair[1]];
+        const ax = (1 - a.x) * W, ay = a.y * H;
+        const bx = (1 - b.x) * W, by = b.y * H;
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+      // --- joints on top ---
+      for (let i = 0; i < lms.length; i++) {
+        const x = (1 - lms[i].x) * W;  // mirror to match scaleX(-1) video
+        const y = lms[i].y * H;
+        // White halo
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath();
+        ctx.arc(x, y, JOINT_R + JOINT_RING, 0, Math.PI * 2);
+        ctx.fill();
+        // Brand-orange core
+        ctx.fillStyle = '#FF4D33';
+        ctx.beginPath();
+        ctx.arc(x, y, JOINT_R, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Highlight the palm centre (landmark 9) — stable anchor the grab
+      // handler uses; worth drawing extra so the user knows where their
+      // grab-point lives while holding a fist.
+      if (lms[9]) {
+        const px = (1 - lms[9].x) * W;
+        const py = lms[9].y * H;
+        ctx.strokeStyle = '#27C7A3';  // mint accent
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(px, py, JOINT_R + 9, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  /**
+   * Compute explode amount from landmarks.
+   *
+   *   2 hands → normalised distance between the two palm centres
+   *             (landmark 9, middle finger base). Clamped so a held-
+   *             together pose reads 0 and arms fully out reads 1.
+   *   1 hand  → thumb-tip ↔ index-tip distance, 3× gain so a natural
+   *             pinch span covers 0..1.
+   *   0 hands → publish zero with hands=0; smoother keeps last value.
+   */
+  function onResults(results) {
+    drawOverlay(results);
+    const lms = results.multiHandLandmarks || [];
+    if (lms.length >= 2) {
+      const a = lms[0][9], b = lms[1][9];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const raw = Math.sqrt(dx*dx + dy*dy);
+      const d = Math.max(0, Math.min(1, (raw - 0.08) / (0.9 - 0.08)));
+      bridgePush(2, d, true);
+      // Two hands — always release grab (prevents accidental drags).
+      bridgeGrab(false, 0, 0);
+      setStatus('TWO HANDS · ' + (d * 100).toFixed(0) + '%');
+    } else if (lms.length === 1) {
+      const l = lms[0];
+      // Palm centre (MCP of middle finger) — stable anchor during grab.
+      const palm = l[9];
+      // Mirror to match the visual scaleX(-1): user's right hand shows
+      // on right of screen, so model should follow.
+      const hx = 1 - palm.x;
+      const hy = palm.y;
+      if (isFist(l)) {
+        // Grab mode — suppress explode control so a closed fist doesn't
+        // also drive explode values. Report the palm centre only.
+        bridgeGrab(true, hx, hy);
+        bridgePush(1, -1, true);  // sentinel: -1 = no explode update
+        setStatus('GRAB · DRAGGING');
+      } else {
+        // Open hand — release grab, drive explode via thumb-index span.
+        bridgeGrab(false, hx, hy);
+        const thumb = l[4], index = l[8];
+        const raw = Math.sqrt((thumb.x-index.x)**2 + (thumb.y-index.y)**2);
+        const d = Math.max(0, Math.min(1, (raw - 0.04) * 3.5));
+        bridgePush(1, d, true);
+        setStatus('ONE HAND · ' + (d * 100).toFixed(0) + '%');
+      }
+    } else {
+      bridgePush(0, 0, false);
+      bridgeGrab(false, 0, 0);
+      setStatus('SHOW HANDS TO CAMERA');
+    }
+  }
+
+  /**
+   * Drive the MediaPipe Hands model from the <video> every frame via
+   * requestAnimationFrame. Avoids the @mediapipe/camera_utils helper
+   * so we can skip loading two packages.
+   */
+  async function runLoop(hands, video) {
+    let lastT = 0;
+    async function step() {
+      if (video.readyState >= 2 && performance.now() - lastT > 60) {
+        lastT = performance.now();
+        try { await hands.send({ image: video }); } catch (e) { /* frame drop */ }
+      }
+      requestAnimationFrame(step);
+    }
+    step();
+  }
+
+  async function main() {
+    setStatus('LOADING MEDIAPIPE…');
+    const root = await ensureHands();
+    const hands = new window.Hands({ locateFile: (f) => root + f });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0,          // 0 = lite, fastest; 1 = full
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    hands.onResults(onResults);
+    setStatus('REQUESTING CAMERA…');
+    const video = await startCamera();
+    setStatus('TRACKING HANDS…');
+    runLoop(hands, video);
+  }
+
+  main().catch(e => {
+    const msg = e && e.message ? e.message : String(e);
+    fail(msg);
+    // Clear cue to the user about what failed vs. the generic "举起手"
+    // chip in the host page, and a recovery hint.
+    setStatus('CAMERA BUSY · 回到 AR 再点手势重试');
+  });
+})();
+</script>
+</body>
+</html>

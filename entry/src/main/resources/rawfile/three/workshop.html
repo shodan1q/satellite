@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no" />
+<title>Nebula · Workshop</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+    background: linear-gradient(180deg,#F8FAFE 0%,#EEF2FA 55%,#E3ECF8 100%);
+    font-family: "HarmonyOS Sans","PingFang SC","Helvetica Neue",system-ui,sans-serif;
+    color: #0C1B33; -webkit-tap-highlight-color: transparent; }
+  #canvas { position: absolute; inset: 0; display: block; }
+  .badge {
+    position: absolute; left: 50%; transform: translateX(-50%); top: 16px;
+    background: rgba(255,255,255,0.82); backdrop-filter: blur(18px);
+    border: 1px solid #E3E8F2; color: #3E4D6B; font-size: 12px;
+    padding: 6px 14px; border-radius: 999px; letter-spacing: 0.6px;
+    box-shadow: 0 6px 22px rgba(26,42,85,0.08);
+  }
+  .label {
+    position: absolute; pointer-events: none;
+    background: rgba(255,255,255,0.92);
+    color: #0C1B33; font-size: 11px;
+    border: 1px solid #E3E8F2; padding: 4px 8px;
+    border-radius: 6px; white-space: nowrap;
+    transform: translate(-50%,-120%); opacity: 0; transition: opacity .2s ease;
+    box-shadow: 0 4px 14px rgba(26,42,85,0.12);
+  }
+  .label.show { opacity: 1; }
+  .label::after {
+    content: ''; position: absolute; left: 50%; top: 100%;
+    transform: translateX(-50%);
+    border: 5px solid transparent; border-top-color: rgba(255,255,255,0.92);
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div class="badge" id="badge">WORKSHOP · 0 PART</div>
+<div class="label" id="hoverLabel"></div>
+
+<script src="./three.min.js"></script>
+<script>
+(function(){
+  const THREE = window.THREE;
+  const canvas = document.getElementById('canvas');
+  const badge = document.getElementById('badge');
+  const hoverLabel = document.getElementById('hoverLabel');
+
+  /* ---------- Renderer / Scene / Camera ---------- */
+  const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  scene.background = null;
+
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+  camera.position.set(7, 5.2, 9);
+  camera.lookAt(0, 1.4, 0);
+
+  /* ---------- Lighting ---------- */
+  const hemi = new THREE.HemisphereLight(0xffffff, 0xDDE4F0, 0.85);
+  scene.add(hemi);
+
+  const key = new THREE.DirectionalLight(0xffffff, 1.2);
+  key.position.set(6, 10, 5); key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024);
+  key.shadow.camera.left = -6; key.shadow.camera.right = 6;
+  key.shadow.camera.top = 6; key.shadow.camera.bottom = -6;
+  key.shadow.radius = 6;
+  scene.add(key);
+
+  const rim = new THREE.DirectionalLight(0x7FA9FF, 0.5);
+  rim.position.set(-6, 4, -6);
+  scene.add(rim);
+
+  /* ---------- Ground plate (disc + grid) ---------- */
+  const ground = new THREE.Group();
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(5.5, 64),
+    new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.85, metalness: 0.02 })
+  );
+  disc.rotation.x = -Math.PI / 2;
+  disc.receiveShadow = true;
+  ground.add(disc);
+
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(5.4, 5.55, 64),
+    new THREE.MeshBasicMaterial({ color: 0xCBD5E8, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.001;
+  ground.add(ring);
+
+  const grid = new THREE.GridHelper(10, 20, 0xD8E0EE, 0xE8EDF6);
+  grid.position.y = 0.002;
+  ground.add(grid);
+
+  // launch pad (a subtle pedestal)
+  const pad = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.4, 1.55, 0.12, 48),
+    new THREE.MeshStandardMaterial({ color: 0xE8EDF6, roughness: 0.8, metalness: 0.1 })
+  );
+  pad.position.y = 0.06;
+  pad.receiveShadow = true;
+  ground.add(pad);
+
+  const padRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.48, 0.02, 16, 64),
+    new THREE.MeshBasicMaterial({ color: 0x2E6BF6 })
+  );
+  padRing.rotation.x = -Math.PI/2;
+  padRing.position.y = 0.12;
+  ground.add(padRing);
+
+  scene.add(ground);
+
+  /* ---------- Atmosphere halo (soft disc at horizon for light theme) ---------- */
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(6.5, 9.5, 64),
+    new THREE.MeshBasicMaterial({
+      color: 0x5B8CFF,
+      transparent: true,
+      opacity: 0.08,
+      side: THREE.DoubleSide
+    })
+  );
+  halo.rotation.x = -Math.PI/2;
+  halo.position.y = 0.004;
+  scene.add(halo);
+
+  /* ---------- Rocket assembly root ---------- */
+  const rocketGroup = new THREE.Group();
+  rocketGroup.position.y = 0.12;
+  scene.add(rocketGroup);
+
+  /* ---------- Build state ---------- */
+  const state = {
+    parts: [],          // ordered array of PartSpec
+    meshes: new Map(),  // partId -> { mesh, base, target }
+    hovered: null,
+    selected: null,
+    explode: 0,
+    autoSpin: true
+  };
+
+  /* ---------- Geometry builders ---------- */
+
+  function buildMaterial(part, hovered, selected) {
+    const base = new THREE.Color(part.color || '#F8FAFE');
+    const color = selected ? base.clone().lerp(new THREE.Color(0x2E6BF6), 0.25)
+      : hovered ? base.clone().lerp(new THREE.Color(0xFFFFFF), 0.2)
+      : base;
+    return new THREE.MeshStandardMaterial({
+      color: color,
+      roughness: 0.45,
+      metalness: 0.25,
+      emissive: selected ? new THREE.Color(0x2E6BF6) : new THREE.Color(0x000000),
+      emissiveIntensity: selected ? 0.25 : 0.0
+    });
+  }
+
+  function accentMaterial(hex) {
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(hex || '#2E6BF6'),
+      roughness: 0.5,
+      metalness: 0.35
+    });
+  }
+
+  function makeNose(part) {
+    const g = new THREE.Group();
+    const geom = new THREE.ConeGeometry(part.radiusBottom, part.height, 48, 1);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    g.add(mesh);
+    // subtle ring
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(part.radiusBottom * 0.98, 0.012, 12, 48),
+      accentMaterial(part.accent || '#2E6BF6')
+    );
+    ring.rotation.x = Math.PI/2;
+    ring.position.y = -part.height/2 + 0.02;
+    g.add(ring);
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeStage(part, tag) {
+    const g = new THREE.Group();
+    const geom = new THREE.CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 48, 1, false);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    g.add(mesh);
+
+    // accent stripe
+    const stripe = new THREE.Mesh(
+      new THREE.CylinderGeometry(part.radiusBottom * 1.002, part.radiusTop * 1.002, part.height * 0.06, 48),
+      accentMaterial(part.accent)
+    );
+    stripe.position.y = part.height * 0.35;
+    g.add(stripe);
+
+    // body text plate — using a canvas texture
+    const plate = makeStagePlate(part, tag);
+    if (plate) {
+      plate.position.y = 0;
+      plate.position.z = Math.max(part.radiusTop, part.radiusBottom) + 0.005;
+      g.add(plate);
+    }
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeStagePlate(part, tag) {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0,0,256,128);
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    roundRect(ctx, 8, 32, 240, 64, 16, true);
+    ctx.fillStyle = '#0C1B33';
+    ctx.font = '600 26px "HarmonyOS Sans","PingFang SC"';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(part.display, 128, 64);
+    ctx.fillStyle = part.accent || '#2E6BF6';
+    ctx.font = '600 14px "HarmonyOS Sans"';
+    ctx.fillText(tag || ('STAGE ' + (part.id || '')).toUpperCase(), 128, 20);
+    const tex = new THREE.CanvasTexture(c);
+    tex.encoding = THREE.sRGBEncoding;
+    const geom = new THREE.PlaneGeometry(part.radiusBottom * 1.3, part.radiusBottom * 0.65);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+    return new THREE.Mesh(geom, mat);
+  }
+
+  function roundRect(ctx, x, y, w, h, r, fill) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    if (fill) ctx.fill();
+  }
+
+  function makeInterstage(part) {
+    const g = new THREE.Group();
+    const geom = new THREE.CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 48);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    g.add(mesh);
+
+    // detail rings top and bottom
+    for (const y of [-part.height/2 + 0.04, part.height/2 - 0.04]) {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(part.radiusTop * 1.02, 0.018, 12, 48),
+        accentMaterial(part.accent || '#8FA1C2')
+      );
+      ring.rotation.x = Math.PI/2;
+      ring.position.y = y;
+      g.add(ring);
+    }
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeFairing(part) {
+    const g = new THREE.Group();
+    const geom = new THREE.ConeGeometry(part.radiusBottom, part.height, 48, 1);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    g.add(mesh);
+    // vertical seam (two halves)
+    const seamMat = accentMaterial(part.accent || '#11B7D6');
+    const seam1 = new THREE.Mesh(new THREE.BoxGeometry(0.012, part.height * 0.94, 0.018), seamMat);
+    const seam2 = seam1.clone();
+    seam1.position.set(part.radiusBottom * 0.95, 0, 0);
+    seam2.position.set(-part.radiusBottom * 0.95, 0, 0);
+    g.add(seam1); g.add(seam2);
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeBooster(part, side) {
+    const g = new THREE.Group();
+    const geom = new THREE.CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 32);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true;
+    g.add(mesh);
+    // nose cone on the booster
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(part.radiusTop, part.radiusTop * 1.6, 32),
+      buildMaterial(part)
+    );
+    cone.position.y = part.height/2 + (part.radiusTop * 0.8);
+    g.add(cone);
+    // offset to side
+    g.position.x = side === 'left' ? -0.9 : 0.9;
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeEngine(part) {
+    const g = new THREE.Group();
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 48),
+      new THREE.MeshStandardMaterial({ color: 0xB0B9CC, roughness: 0.3, metalness: 0.7 })
+    );
+    base.castShadow = true;
+    g.add(base);
+    // nozzles
+    const nozGeom = new THREE.CylinderGeometry(0.08, 0.14, 0.28, 24, 1, true);
+    const nozMat = new THREE.MeshStandardMaterial({ color: 0x9AA6C0, roughness: 0.4, metalness: 0.5, side: THREE.DoubleSide });
+    const positions = [
+      [0,0],
+      [0.4,0],[-0.4,0],[0,0.4],[0,-0.4],
+      [0.28,0.28],[-0.28,0.28],[0.28,-0.28],[-0.28,-0.28]
+    ];
+    for (const [x,z] of positions.slice(0, 5)) {
+      const n = new THREE.Mesh(nozGeom, nozMat);
+      n.position.set(x, -part.height/2 - 0.14, z);
+      g.add(n);
+    }
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makePayload(part) {
+    const g = new THREE.Group();
+    const geom = new THREE.CylinderGeometry(part.radiusTop, part.radiusBottom, part.height, 48);
+    const mesh = new THREE.Mesh(geom, buildMaterial(part));
+    mesh.castShadow = true;
+    g.add(mesh);
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeSolar(part, side) {
+    const g = new THREE.Group();
+    const panel = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6, part.height, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x1F3A8A, roughness: 0.3, metalness: 0.6 })
+    );
+    panel.castShadow = true;
+    g.add(panel);
+    // cells
+    const cells = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.48, part.height * 0.9),
+      cellsMaterial()
+    );
+    cells.position.z = 0.021;
+    g.add(cells);
+    g.position.x = side === 'left' ? -1.3 : 1.3;
+    g.rotation.z = side === 'left' ? -Math.PI/2 : Math.PI/2;
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function cellsMaterial() {
+    const c = document.createElement('canvas');
+    c.width = 128; c.height = 512;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#132A75'; ctx.fillRect(0,0,128,512);
+    ctx.fillStyle = '#1F4AD2';
+    for (let y = 0; y < 512; y += 20) {
+      for (let x = 0; x < 128; x += 20) {
+        ctx.fillRect(x+2, y+2, 16, 16);
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.encoding = THREE.sRGBEncoding;
+    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.4, metalness: 0.3 });
+  }
+
+  function makeAntenna(part) {
+    const g = new THREE.Group();
+    const dish = new THREE.Mesh(
+      new THREE.SphereGeometry(part.radiusBottom, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2.5),
+      new THREE.MeshStandardMaterial({ color: 0xFBFCFE, roughness: 0.3, metalness: 0.3, side: THREE.DoubleSide })
+    );
+    dish.rotation.x = Math.PI;
+    dish.castShadow = true;
+    g.add(dish);
+    const stand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.03, part.height, 12),
+      accentMaterial(part.accent || '#E9A23B')
+    );
+    stand.position.y = -part.height/2;
+    g.add(stand);
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function makeBus(part) {
+    const g = new THREE.Group();
+    const core = new THREE.Mesh(
+      new THREE.BoxGeometry(part.radiusBottom*1.5, part.height, part.radiusBottom*1.5),
+      buildMaterial(part)
+    );
+    core.castShadow = true;
+    g.add(core);
+    // seams
+    const edgeMat = accentMaterial(part.accent || '#2E6BF6');
+    const bevel = 0.02;
+    const w = part.radiusBottom*1.5, h = part.height;
+    const positions = [
+      [w/2, h/2, 0], [-w/2, h/2, 0], [w/2, -h/2, 0], [-w/2, -h/2, 0]
+    ];
+    for (const p of positions) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(bevel, h, bevel), edgeMat);
+      bar.position.set(p[0], 0, p[2]);
+      g.add(bar);
+    }
+    g.userData.label = part.display;
+    return g;
+  }
+
+  function buildPartMesh(part) {
+    switch (part.kind) {
+      case 'nose': return makeNose(part);
+      case 'fairing': return makeFairing(part);
+      case 'payload': return makePayload(part);
+      case 'interstage': return makeInterstage(part);
+      case 'stage': return makeStage(part, part.tag);
+      case 'booster': return makeBooster(part, part.display && part.display.endsWith('左') ? 'left' : 'right');
+      case 'engine': return makeEngine(part);
+      case 'solar': return makeSolar(part, part.display && part.display.endsWith('左') ? 'left' : 'right');
+      case 'antenna': return makeAntenna(part);
+      case 'bus': return makeBus(part);
+      default: return makePayload(part);
+    }
+  }
+
+  /* ---------- Stack layout (rocket only stacks nose/stage/interstage/engine) ---------- */
+
+  function layout(parts) {
+    const order = ['nose', 'payload', 'fairing', 'interstage', 'stage', 'engine'];
+    const stacked = parts.filter(p => order.includes(p.kind) && p.kind !== 'fairing');
+    const hasFairing = parts.find(p => p.kind === 'fairing');
+    const sideParts = parts.filter(p => ['booster', 'solar', 'antenna'].includes(p.kind));
+    const mainParts = stacked.slice().sort((a,b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+    // When fairing exists it encloses nose+payload; we visualize by replacing the nose slot.
+    if (hasFairing) {
+      const withoutNose = mainParts.filter(p => p.kind !== 'nose' && p.kind !== 'payload');
+      withoutNose.unshift(hasFairing);
+      // Fairing at index 0
+      return { stack: withoutNose, sides: sideParts };
+    }
+    return { stack: mainParts, sides: sideParts };
+  }
+
+  function rebuild() {
+    // clear old
+    while (rocketGroup.children.length > 0) {
+      const c = rocketGroup.children[0];
+      rocketGroup.remove(c);
+      if (c.geometry) c.geometry.dispose?.();
+    }
+    state.meshes.clear();
+
+    const { stack, sides } = layout(state.parts);
+
+    // stack from bottom to top. First compute total height.
+    let cursor = 0;
+    const stackBottomToTop = stack.slice().reverse();
+    for (const p of stackBottomToTop) {
+      const mesh = buildPartMesh(p);
+      mesh.position.y = cursor + p.height/2;
+      state.meshes.set(p.id, { mesh, base: mesh.position.clone(), partId: p.id });
+      rocketGroup.add(mesh);
+      cursor += p.height;
+    }
+    // attach sides at middle height of the rocket
+    const midY = cursor / 2;
+    for (const p of sides) {
+      const mesh = buildPartMesh(p);
+      mesh.position.y = midY + (mesh.position.y || 0);
+      state.meshes.set(p.id, { mesh, base: mesh.position.clone(), partId: p.id });
+      rocketGroup.add(mesh);
+    }
+
+    badge.textContent = 'WORKSHOP · ' + state.parts.length + ' PART';
+    applyExplode(state.explode);
+    notifyBridge('build', state.parts.map(p => ({
+      partId: p.id, kind: p.kind, display: p.display,
+      color: p.color, height: p.height,
+      radiusTop: p.radiusTop, radiusBottom: p.radiusBottom
+    })));
+  }
+
+  function notifyBridge(event, payload) {
+    try {
+      if (window.nebula && window.nebula.postMessage) {
+        window.nebula.postMessage(JSON.stringify({ event, payload }));
+      }
+    } catch (e) {}
+  }
+
+  /* ---------- Explode / select / hover ---------- */
+
+  function applyExplode(ratio) {
+    state.explode = ratio;
+    for (const entry of state.meshes.values()) {
+      const p = state.parts.find(x => x.id === entry.partId);
+      const off = (p && p.explodeOffset) || { x: 0, y: 0.2, z: 0 };
+      entry.mesh.position.set(
+        entry.base.x + off.x * ratio,
+        entry.base.y + off.y * ratio,
+        entry.base.z + off.z * ratio
+      );
+    }
+  }
+
+  function highlight(partId) {
+    for (const [id, entry] of state.meshes.entries()) {
+      const mesh = entry.mesh.children[0];
+      if (!mesh || !mesh.material) continue;
+      mesh.material.emissive = new THREE.Color(id === partId ? 0x2E6BF6 : 0x000000);
+      mesh.material.emissiveIntensity = id === partId ? 0.28 : 0.0;
+      mesh.material.needsUpdate = true;
+    }
+  }
+
+  /* ---------- Camera controls (orbit by touch / mouse) ---------- */
+  const orbit = { theta: Math.PI * 0.18, phi: Math.PI * 0.32, radius: 11, target: new THREE.Vector3(0, 1.6, 0) };
+  let last = null;
+
+  function updateCamera() {
+    const x = orbit.target.x + orbit.radius * Math.sin(orbit.phi) * Math.cos(orbit.theta);
+    const y = orbit.target.y + orbit.radius * Math.cos(orbit.phi);
+    const z = orbit.target.z + orbit.radius * Math.sin(orbit.phi) * Math.sin(orbit.theta);
+    camera.position.set(x, y, z);
+    camera.lookAt(orbit.target);
+  }
+  updateCamera();
+
+  function onPointerDown(e) {
+    const p = eventPoint(e);
+    last = { x: p.x, y: p.y, tapX: p.x, tapY: p.y, at: Date.now() };
+    state.autoSpin = false;
+  }
+  function onPointerMove(e) {
+    if (!last) return;
+    const p = eventPoint(e);
+    const dx = p.x - last.x, dy = p.y - last.y;
+    orbit.theta -= dx * 0.006;
+    orbit.phi = Math.max(0.18, Math.min(Math.PI - 0.18, orbit.phi - dy * 0.006));
+    last.x = p.x; last.y = p.y;
+    updateCamera();
+  }
+  function onPointerUp(e) {
+    if (last && Date.now() - last.at < 220) {
+      const p = eventPoint(e);
+      if (Math.hypot(p.x - last.tapX, p.y - last.tapY) < 6) {
+        handleTap(p.x, p.y);
+      }
+    }
+    last = null;
+  }
+  function eventPoint(e) {
+    const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  canvas.addEventListener('mousedown', onPointerDown);
+  window.addEventListener('mousemove', onPointerMove);
+  window.addEventListener('mouseup', onPointerUp);
+  canvas.addEventListener('touchstart', onPointerDown, { passive: true });
+  canvas.addEventListener('touchmove', onPointerMove, { passive: true });
+  canvas.addEventListener('touchend', onPointerUp);
+  canvas.addEventListener('wheel', (e) => {
+    orbit.radius = Math.max(5, Math.min(18, orbit.radius + e.deltaY * 0.01));
+    updateCamera();
+  }, { passive: true });
+
+  /* ---------- Hit test ---------- */
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+
+  function handleTap(x, y) {
+    const rect = canvas.getBoundingClientRect();
+    pointer.x = ((x - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((y - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(rocketGroup.children, true);
+    if (hits.length === 0) { showHoverLabel(null); highlight(null); state.selected = null; notifyBridge('select', null); return; }
+    let g = hits[0].object;
+    while (g.parent && !state.meshes.get(g.userData?.partId || 'x')) {
+      const entry = [...state.meshes.values()].find(e => e.mesh === g);
+      if (entry) { g = entry.mesh; break; }
+      g = g.parent;
+      if (!g) break;
+    }
+    // find which partId owns this mesh
+    let chosen = null;
+    for (const [id, entry] of state.meshes.entries()) {
+      if (entry.mesh === g || entry.mesh.children.includes(g)) { chosen = id; break; }
+    }
+    if (!chosen) { for (const [id, entry] of state.meshes.entries()) {
+      if (entry.mesh.getObjectById(g.id)) { chosen = id; break; }
+    } }
+    state.selected = chosen;
+    highlight(chosen);
+    if (chosen) {
+      const p = state.parts.find(x => x.id === chosen);
+      showHoverLabel(p?.display || '', x, y);
+      notifyBridge('select', { partId: chosen });
+    }
+  }
+
+  function showHoverLabel(text, x, y) {
+    if (!text) { hoverLabel.classList.remove('show'); return; }
+    hoverLabel.textContent = text;
+    hoverLabel.style.left = x + 'px';
+    hoverLabel.style.top = y + 'px';
+    hoverLabel.classList.add('show');
+    clearTimeout(showHoverLabel._t);
+    showHoverLabel._t = setTimeout(() => hoverLabel.classList.remove('show'), 1600);
+  }
+
+  /* ---------- Resize ---------- */
+  function resize() {
+    const w = canvas.clientWidth = window.innerWidth;
+    const h = canvas.clientHeight = window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  /* ---------- Animation ---------- */
+  const clock = new THREE.Clock();
+  function tick() {
+    const dt = clock.getDelta();
+    if (state.autoSpin) {
+      orbit.theta += dt * 0.15;
+      updateCamera();
+    }
+    halo.rotation.z += dt * 0.05;
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  /* ---------- Bridge API (called from ArkTS via runJavaScript) ---------- */
+  window.Nebula = {
+    setParts(parts) {
+      state.parts = parts || [];
+      rebuild();
+    },
+    addPart(part) {
+      state.parts = state.parts.concat(part);
+      rebuild();
+    },
+    removePart(id) {
+      state.parts = state.parts.filter(p => p.id !== id);
+      rebuild();
+    },
+    clear() {
+      state.parts = [];
+      rebuild();
+    },
+    setExplode(ratio) {
+      applyExplode(ratio);
+    },
+    selectPart(id) {
+      state.selected = id;
+      highlight(id);
+    },
+    setAutoSpin(on) {
+      state.autoSpin = !!on;
+    },
+    snapshot() {
+      return state.parts;
+    }
+  };
+
+  // Tell host we're ready
+  setTimeout(() => notifyBridge('ready', true), 80);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1785 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no" />
+<title>Nebula · AR Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100vw; height: 100vh; overflow: hidden;
+    background: transparent !important;
+    font-family: "HarmonyOS Sans","PingFang SC",system-ui,sans-serif;
+    color: #fff; -webkit-tap-highlight-color: transparent; }
+  #canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    display: block; background: transparent; margin: 0; padding: 0; }
+  .reticle {
+    position: absolute; left: 50%; top: 50%;
+    width: 168px; height: 168px; transform: translate(-50%, -50%);
+    border: 1.5px solid rgba(46,107,246,0.55);
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 2px rgba(46,107,246,0.16), 0 0 28px rgba(46,107,246,0.18);
+    opacity: 0;
+    transition: opacity 0.25s ease, transform 0.3s ease, border-color 0.25s ease;
+    pointer-events: none;
+  }
+  .reticle::before, .reticle::after {
+    content: ''; position: absolute; background: rgba(12,27,51,0.55);
+  }
+  .reticle::before { left: 50%; top: 50%; width: 22px; height: 1.5px; transform: translate(-50%, -50%); }
+  .reticle::after  { left: 50%; top: 50%; width: 1.5px; height: 22px; transform: translate(-50%, -50%); }
+  .reticle.show { opacity: 1; }
+  .reticle.ok { border-color: rgba(39,199,163,0.9); box-shadow: inset 0 0 0 3px rgba(39,199,163,0.28), 0 0 34px rgba(39,199,163,0.35); }
+  .hint {
+    position: absolute; left: 50%; top: calc(50% + 120px);
+    transform: translateX(-50%);
+    color: #0C1B33; font-size: 13px; letter-spacing: 0.6px; font-weight: 500;
+    background: rgba(255,255,255,0.85);
+    border: 1px solid rgba(255,255,255,0.7);
+    padding: 6px 14px; border-radius: 999px;
+    box-shadow: 0 6px 22px rgba(12,27,51,0.10);
+    opacity: 0; transition: opacity 0.3s ease;
+    pointer-events: none;
+  }
+  .hint.show { opacity: 1; }
+  .longpress {
+    position: absolute; left: 0; top: 0;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    border: 2px solid rgba(46,107,246,0.9);
+    background: radial-gradient(circle, rgba(46,107,246,0.28) 0%, rgba(46,107,246,0) 70%);
+    box-shadow: 0 0 30px rgba(46,107,246,0.45);
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .longpress.locked {
+    border-color: rgba(18,178,122,0.95);
+    background: radial-gradient(circle, rgba(18,178,122,0.28) 0%, rgba(18,178,122,0) 70%);
+    box-shadow: 0 0 30px rgba(18,178,122,0.5);
+  }
+  .longpress .inner {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 1.5px dashed rgba(12,27,51,0.45);
+    animation: lpspin 1.6s linear infinite;
+  }
+  @keyframes lpspin { to { transform: rotate(360deg); } }
+  .lp-label {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    color: #0C1B33; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.5px;
+    background: rgba(255,255,255,0.9);
+    border: 1px solid rgba(255,255,255,0.7);
+    padding: 3px 9px; border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(12,27,51,0.12);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div class="reticle" id="reticle"></div>
+<div class="hint" id="hint">轻点屏幕放置火箭</div>
+
+<!--
+  Single bundled script — three.js r160 + GLTFLoader + @mkkellogg/
+  gaussian-splats-3d, all concatenated by esbuild into one IIFE that
+  exposes `window.NebulaThreeBundle`. We bundle rather than use
+  `<script type="module">` + importmap because the HarmonyOS ArkWeb
+  WebView's `resource://` scheme does NOT resolve ESM specifiers
+  reliably — the module graph silently fails to load and the canvas
+  stays black with no error surface.
+  See /tmp/nebula-bundle/entry.js for the bundle source.
+-->
+<script src="./nebula-three-bundle.js"></script>
+<script>
+// Wrap the whole init so any thrown error surfaces as a visible banner
+// instead of leaving the WebView blank. A black canvas is the worst
+// possible failure mode — we always want SOME signal.
+window.addEventListener('error', function(e){
+  try {
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:12px;right:12px;top:12px;' +
+      'padding:14px;background:#1b0a08;color:#FFB4A8;' +
+      'border:1px solid #E5554A;border-radius:12px;font:12px/1.4 sans-serif;' +
+      'z-index:9999;white-space:pre-wrap;max-height:60vh;overflow:auto';
+    box.textContent = '[ar.html] ' +
+      (e.message || 'unknown') +
+      ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?');
+    document.body.appendChild(box);
+  } catch (_) {}
+});
+(function(){
+  if (!window.NebulaThreeBundle) {
+    document.body.innerHTML =
+      '<div style="color:#FAFAFA;padding:24px;font-family:sans-serif;' +
+      'background:#0A0A0C;height:100vh">' +
+      'AR 场景加载失败：nebula-three-bundle.js 未找到或未执行。' +
+      '</div>';
+    return;
+  }
+  const THREE = window.NebulaThreeBundle.THREE;
+  const GLTFLoader = window.NebulaThreeBundle.GLTFLoader;
+  const GaussianSplats3D = window.NebulaThreeBundle.GaussianSplats3D;
+
+  // --- fetch polyfill for scene files -----------------------------------
+  // The Gaussian-splats library calls `fetch(url).then(r => r.arrayBuffer())`
+  // to download .spz/.ksplat/.splat/.ply scenes. That works fine over http(s)
+  // but the ArkWeb WebView silently rejects the same call for the
+  // `resource://rawfile/...` scheme our bundled scenes live under — so the
+  // splat viewer never receives any bytes and our catch block just toggles
+  // back to the procedural fallback with no visible error.
+  // Wrap fetch here: if the URL looks like one of our bundled scenes, hand
+  // it off to the native bridge (`window.nebula.getRawfileBytes`) which
+  // reads the rawfile via ArkTS's resourceManager and returns base64.
+  // Everything else falls through to the real fetch.
+  (function installSceneFetchShim(){
+    const realFetch = window.fetch ? window.fetch.bind(window) : null;
+    function base64ToArrayBuffer(b64) {
+      const bin = atob(b64);
+      const n = bin.length;
+      const buf = new Uint8Array(n);
+      for (let i = 0; i < n; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+    function resolveRawfilePath(urlStr) {
+      // Return the rawfile-relative path for any URL that points inside
+      // our scenes/ directory, else null. We match on the suffix so both
+      // "./scenes/forge.spz" and a fully-resolved "resource://rawfile/
+      // three/scenes/forge.spz" work.
+      const m = urlStr.match(/(?:^|\/)three\/(scenes\/[\w.-]+\.(?:spz|ksplat|splat|ply))$/i);
+      if (m) return 'three/' + m[1];
+      const m2 = urlStr.match(/(?:^|\/)(scenes\/[\w.-]+\.(?:spz|ksplat|splat|ply))$/i);
+      if (m2) return 'three/' + m2[1];
+      return null;
+    }
+    window.fetch = function(input, init) {
+      let urlStr = '';
+      if (typeof input === 'string') urlStr = input;
+      else if (input && input.url) urlStr = input.url;
+      const rawPath = resolveRawfilePath(urlStr);
+      console.log('[fetch] url=' + urlStr + ' rawPath=' + rawPath +
+        ' hasBridge=' + !!(window.nebula && window.nebula.getRawfileBytes));
+      if (rawPath && window.nebula && typeof window.nebula.getRawfileBytes === 'function') {
+        try {
+          const b64 = window.nebula.getRawfileBytes(rawPath);
+          console.log('[fetch] bridge returned ' + (b64 ? b64.length : 0) + ' base64 chars for ' + rawPath);
+          if (!b64) {
+            return Promise.resolve(new Response('', { status: 404, statusText: 'Not Found' }));
+          }
+          const ab = base64ToArrayBuffer(b64);
+          console.log('[fetch] decoded to ArrayBuffer of ' + ab.byteLength + ' bytes');
+          return Promise.resolve(new Response(ab, {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'Content-Type': 'application/octet-stream',
+                       'Content-Length': String(ab.byteLength) }
+          }));
+        } catch (e) {
+          console.error('[fetch] bridge read threw: ' + (e && e.message ? e.message : e));
+          return Promise.reject(e);
+        }
+      }
+      if (!realFetch) {
+        console.error('[fetch] no realFetch and no bridge match for ' + urlStr);
+        return Promise.reject(new Error('fetch not available for ' + urlStr));
+      }
+      return realFetch(input, init);
+    };
+  })();
+  // Legacy call-sites that still read `window.THREE` work after this.
+  window.THREE = THREE;
+  const canvas = document.getElementById('canvas');
+  const reticle = document.getElementById('reticle');
+  const hint = document.getElementById('hint');
+
+  const renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true, alpha: true, premultipliedAlpha: false
+  });
+  renderer.setClearColor(0x000000, 0);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // three r152+ uses `outputColorSpace` (previous: `outputEncoding`).
+  // SRGBColorSpace is the default in recent versions, so setting it
+  // explicitly matches the old behavior and is idempotent.
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  scene.background = null;
+
+  const camera = new THREE.PerspectiveCamera(62, 1, 0.05, 80);
+  camera.position.set(0, 0, 0);
+  camera.rotation.order = 'YXZ';
+
+  /* lighting: hemisphere + soft key + rim */
+  scene.add(new THREE.HemisphereLight(0xFFFFFF, 0xDCE7FA, 0.9));
+  const key = new THREE.DirectionalLight(0xFFFFFF, 1.05);
+  key.position.set(3, 6, 4); key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024);
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0x89B4FF, 0.45);
+  rim.position.set(-4, 3, -4);
+  scene.add(rim);
+
+  /* anchor root — this is the virtual "ground" we place at first tap */
+  const anchor = new THREE.Group();
+  anchor.visible = false;
+  scene.add(anchor);
+
+  /* soft ground ring shown at anchor */
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x2E6BF6, transparent: true, opacity: 0.45 });
+  const ring1 = new THREE.Mesh(new THREE.RingGeometry(0.65, 0.7, 64), ringMat);
+  ring1.rotation.x = -Math.PI/2;
+  anchor.add(ring1);
+  const ring2 = new THREE.Mesh(
+    new THREE.RingGeometry(0.9, 0.92, 64),
+    new THREE.MeshBasicMaterial({ color: 0x11B7D6, transparent: true, opacity: 0.25 })
+  );
+  ring2.rotation.x = -Math.PI/2; ring2.position.y = 0.001;
+  anchor.add(ring2);
+  const groundDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 48),
+    new THREE.MeshBasicMaterial({ color: 0xFFFFFF, transparent: true, opacity: 0.08 })
+  );
+  groundDisc.rotation.x = -Math.PI/2;
+  anchor.add(groundDisc);
+
+  /* the rocket lives in this group, anchored. We scale it down so even the
+     tallest catalog entry (~10 units tall) fits comfortably in the FOV at
+     the default anchor distance. Anchor.y is recomputed in rebuild() so the
+     rocket's vertical center always lands at world y = 0. */
+  const ROCKET_SCALE = 0.26;
+  const ANCHOR_DEFAULT = { x: 0, y: -0.8, z: -3.4 };
+
+  const rocket = new THREE.Group();
+  rocket.scale.setScalar(ROCKET_SCALE);
+  rocket.position.y = 0.0;
+  anchor.add(rocket);
+
+  // Fake contact shadow — grounds the rocket on light backdrops.
+  const shadowDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(1.1, 64),
+    new THREE.MeshBasicMaterial({ color: 0x0C1B33, transparent: true, opacity: 0.22, depthWrite: false })
+  );
+  shadowDisc.rotation.x = -Math.PI / 2;
+  shadowDisc.position.y = 0.002;
+  anchor.add(shadowDisc);
+
+  const state = {
+    parts: [],
+    meshes: new Map(),
+    selected: null,
+    explode: 0,
+    anchored: false,
+    anchorDistance: 3.4,
+    yaw: 0, pitch: 0, roll: 0,
+    yawRef: null, pitchRef: null, rollRef: null,
+    orientationEnabled: false,
+    // camera control
+    controlMode: 'touch',       // 'touch' (orbit) or 'motion' (device sensors)
+    orbitYaw: 0,                // radians
+    orbitPitch: 0,              // radians
+    orbitRadius: 3.4,
+    orbitRadiusMin: 1.6,
+    orbitRadiusMax: 10,
+    // Orbit target is a world-space point. It stays where you left it
+    // even if the anchor moves — so long-press truly relocates the rocket
+    // to a new pixel instead of the camera chasing it back to the middle.
+    orbitTarget: new THREE.Vector3(0, 0, -3.4),
+    stackHeight: 1.8,           // populated by rebuild() (world units, already scaled)
+    frameRadius: 2.4,           // distance that comfortably frames the model
+    // How far below the model's geometric center the orbit target sits.
+    // Shifts the model upward on screen so the bottom-anchored UI panel
+    // (pills + slider + dock) doesn't bury it. Computed per model; grows
+    // with tall rockets, bounded by a sensible minimum for small models.
+    frameYOffset: 0.4
+  };
+
+  // Auto-anchor at a sensible default so the rocket is visible immediately.
+  // User can still tap to re-anchor.
+  anchor.position.set(ANCHOR_DEFAULT.x, ANCHOR_DEFAULT.y, ANCHOR_DEFAULT.z);
+  anchor.visible = true;
+  state.anchored = true;
+
+  /* =====================================================================
+   * Gaussian-splat workshop — real captured scene, rendered via
+   * @mkkellogg/gaussian-splats-3d. DropInViewer is a three.js Group you
+   * just add to the scene; its internal worker downloads the .ksplat
+   * file from the URL and streams it into a GPU-sorted point cloud.
+   *
+   * Primary scene: "iss" — synthetic Gaussian-splat capture of the
+   * International Space Station (decimated locally from a 10M-splat /
+   * 2.2 GB PLY down to 3M splats / 92 MB by .ply-tools/convert_iss.py;
+   * top-N selection uses opacity * volume so the structural splats
+   * survive and noise/transparent ones drop out). Sized in meters
+   * (ISS bounding box ~128 x 72 x 69 in scene units), so we apply a
+   * scale of 0.1 to bring it into the same world-space neighborhood as
+   * the satellite (~3.5 units tall) while still surrounding it as a
+   * backdrop. Source: SuperSplat asset library, license bundled
+   * alongside the original PLY in the repo root.
+   *
+   * Previous primary: "forge" — a real Gaussian-splat capture of a
+   * blacksmith's workshop (anvil, hearth, scattered tools). Published
+   * by sparkjs.dev on their asset mirror, encoded in Niantic's `.spz`
+   * format (compact: 5.7 MB for ~300K splats). Perfect thematic fit
+   * for our AR *Maker* Workshop — a real tool-bench behind the
+   * satellite being assembled. Source URL, in case we ever want to
+   * refresh it:
+   *     https://sparkjs.dev/assets/splats/forge.spz
+   *
+   * Fallback scene (also bundled, not used by default): counter-7k.splat
+   * from the mip-NeRF 360 dataset (Barron et al. 2022, Google Research,
+   * CC BY 4.0) — a kitchen-counter shot with cluttered tool-like
+   * objects. Swap SPLAT_SCENE_URL to `./scenes/counter-7k.splat` if
+   * forge.spz ever fails to parse on a specific device.
+   *
+   * Both files are shipped inside rawfile/three/scenes/ so the WebView
+   * serves them from the `resource://` scheme (same-origin, no CORS
+   * negotiation, works offline). Remote fetch from the original hosts
+   * is unreliable — e.g. mkkellogg's demo mirror sends
+   * cross-origin-embedder-policy: require-corp without
+   * access-control-allow-origin, so the WebView refuses it.
+   *
+   * If the load fails at parse time (corrupt file, missing feature)
+   * we fall back to the procedural maker lab further down.
+   * ===================================================================== */
+  // Was './scenes/counter-7k.splat' (kitchen counter) — swapped to the
+  // ISS synthetic capture so the AR backdrop reads as "satellite being
+  // assembled inside / near the Space Station" instead of "satellite
+  // floating above a kitchen". Both files live under rawfile/three/scenes
+  // so swapping is a one-line change.
+  const SPLAT_SCENE_URL = './scenes/iss.splat';
+  let splatViewer = null;
+  let splatLoadPromise = null;
+  let splatReady = false;
+  let splatFailed = false;
+  // Tracks what the page most recently asked for — used to reconcile
+  // the splat's visibility at the moment it finishes loading in case
+  // the user has toggled environment off in the meantime.
+  let envDesiredOn = false;
+
+  function ensureSplatLoaded() {
+    if (splatLoadPromise) return splatLoadPromise;
+    // Every stage gets a [splat] log prefix so we can grep the hilog
+    // stream quickly:   hdc hilog | grep "ArViewerWeb.*splat"
+    console.log('[splat] begin load:', SPLAT_SCENE_URL,
+      'GS lib:', !!GaussianSplats3D,
+      'DropInViewer:', !!(GaussianSplats3D && GaussianSplats3D.DropInViewer),
+      'nebula bridge:', !!(window.nebula && window.nebula.getRawfileBytes));
+    splatLoadPromise = (async () => {
+      try {
+        console.log('[splat] constructing DropInViewer');
+        const viewer = new GaussianSplats3D.DropInViewer({
+          // Keep sort work on the main thread — the HarmonyOS WebView's
+          // cross-origin isolation story is inconsistent and the
+          // worker/WebAssembly path has rejected from some devices in
+          // smoke tests. Performance is fine for ~300K splats.
+          gpuAcceleratedSort: false,
+          sharedMemoryForWorkers: false,
+          integerBasedSort: false,
+          dynamicScene: false,
+          // Threshold 25 drops ~30-40% of the lowest-alpha splats at
+          // load time. counter-7k ships 700k+ splats which renders but
+          // tanks FPS on mobile GPUs — trimming to ~400k doubles the
+          // frame rate without a meaningful quality hit (we're behind
+          // a satellite model that covers the center anyway).
+          splatAlphaRemovalThreshold: 25
+        });
+        console.log('[splat] DropInViewer constructed, calling addSplatScene');
+        await viewer.addSplatScene(SPLAT_SCENE_URL, {
+          // ISS synthetic capture is authored Y-up (standard 3DGS export
+          // from SuperSplat / Inria pipeline), matching our orbit camera —
+          // so identity rotation, no flip required. Quaternion is xyzw;
+          // [0,0,0,1] is identity. (counter-7k previously needed
+          // [1,0,0,0] = 180° about X because mip-NeRF 360 scenes are
+          // Y-DOWN; that's NOT the case here.)
+          rotation: [0, 0, 0, 1],
+          // ISS is captured at real-world scale: bbox ~128 x 72 x 69
+          // scene units (i.e. meters — real ISS truss is ~109m). Our
+          // satellite model is ~3.5 world units tall. Scale the splat
+          // to 0.1 so the ISS ends up ~13 x 7 x 7 in world units —
+          // ~3-4x the satellite size, surrounding it as a workshop
+          // backdrop without burying the foreground model.
+          scale: [0.1, 0.1, 0.1],
+          // Splat lives UNDER the anchor group (see scene.add below) so
+          // these coords are in anchor-local space. The anchor itself
+          // is placed at world (0, -0.8, -3.4) to be in front of the
+          // camera — position the splat at anchor-local origin so it
+          // centers on the satellite.
+          position: [0, 0, 0],
+          splatAlphaRemovalThreshold: 25,
+          showLoadingUI: false,
+          // Local file — read it in one shot. progressiveLoad is for
+          // streaming large scenes over HTTP with range requests; the
+          // resource:// scheme doesn't advertise range support so the
+          // streaming path falls over.
+          progressiveLoad: false
+        });
+        console.log('[splat] addSplatScene resolved, viewer ready');
+        splatViewer = viewer;
+        // Reconcile visibility now that the splat exists — user may
+        // have toggled env off between the load start and this resolve.
+        splatViewer.visible = envDesiredOn;
+        // Parent under `anchor`, NOT `scene`, so the splat is placed at
+        // (0, -0.8, -3.4) in world — right where the satellite sits —
+        // instead of at world origin which is 3.4 units behind the
+        // camera. Anchor movement (drag-to-reposition) also carries the
+        // splat with it for free.
+        anchor.add(splatViewer);
+        splatViewer.updateMatrixWorld(true);
+        const wp = new THREE.Vector3();
+        splatViewer.getWorldPosition(wp);
+        console.log('[splat] parented under anchor. splatViewer worldPos=(' +
+          wp.x.toFixed(2) + ',' + wp.y.toFixed(2) + ',' + wp.z.toFixed(2) +
+          ') anchor worldPos=(' + anchor.position.x.toFixed(2) + ',' +
+          anchor.position.y.toFixed(2) + ',' + anchor.position.z.toFixed(2) + ')');
+        // WebGL capability dump — splat shader uses WebGL2-only features
+        // (integer textures, transform feedback in some code paths).
+        // If WebGL1 is all we have, that explains a silent black.
+        try {
+          const gl = renderer.getContext();
+          console.log('[splat] gl version=' + (gl.getParameter(gl.VERSION) || '?') +
+            ' isWebGL2=' + (typeof WebGL2RenderingContext !== 'undefined' &&
+                            gl instanceof WebGL2RenderingContext) +
+            ' renderer=' + (gl.getParameter(gl.RENDERER) || '?'));
+        } catch (e) { console.warn('[splat] gl probe failed: ' + e.message); }
+        // (debug sphere removed — splat rendering confirmed working
+        // during counter-7k validation pass)
+        splatReady = true;
+        // Belt-and-suspenders: hide the procedural fallback NOW, in
+        // addition to the .then() callback in setEnvironment. If for any
+        // reason the .then() doesn't fire (promise chain anomaly,
+        // microtask timing), this guarantees the splat isn't rendering
+        // under the procedural grid forever.
+        if (envDesiredOn) {
+          envGroup.visible = false;
+          console.log('[splat] procedural hidden (inline), envGroup.visible=' + envGroup.visible);
+        }
+        // Try to disable tone mapping on the splat mesh — the shader
+        // emits pre-tone-mapped colors so ACES would only darken them.
+        try {
+          const sm = viewer.splatMesh || (viewer.viewer && viewer.viewer.splatMesh);
+          if (sm && sm.material) {
+            sm.material.toneMapped = false;
+            console.log('[splat] set material.toneMapped=false');
+          }
+        } catch (ee) { /* best-effort */ }
+        // Diagnostic dump: where did the splat land in world space?
+        // If bbox is huge / empty / far from camera, we know it's a
+        // positioning problem, not a rendering problem.
+        try {
+          const sm = viewer.splatMesh || (viewer.viewer && viewer.viewer.splatMesh);
+          if (sm) {
+            const box = new THREE.Box3().setFromObject(sm);
+            console.log('[splat] mesh bbox min=(' + box.min.x.toFixed(2) + ',' +
+              box.min.y.toFixed(2) + ',' + box.min.z.toFixed(2) +
+              ') max=(' + box.max.x.toFixed(2) + ',' + box.max.y.toFixed(2) +
+              ',' + box.max.z.toFixed(2) + ')');
+            const size = new THREE.Vector3(); box.getSize(size);
+            console.log('[splat] mesh size=(' + size.x.toFixed(2) + ',' +
+              size.y.toFixed(2) + ',' + size.z.toFixed(2) + ')');
+          } else {
+            console.log('[splat] viewer has no splatMesh to inspect');
+          }
+          console.log('[splat] camera pos=(' + camera.position.x.toFixed(2) + ',' +
+            camera.position.y.toFixed(2) + ',' + camera.position.z.toFixed(2) +
+            ') target=(' + state.orbitTarget.x.toFixed(2) + ',' +
+            state.orbitTarget.y.toFixed(2) + ',' + state.orbitTarget.z.toFixed(2) + ')');
+          console.log('[splat] renderer toneMapping=' + renderer.toneMapping +
+            ' exposure=' + renderer.toneMappingExposure +
+            ' outputColorSpace=' + renderer.outputColorSpace);
+          console.log('[splat] envGroup.visible=' + envGroup.visible +
+            ' splatViewer.visible=' + splatViewer.visible +
+            ' splatViewer.parent=' + (splatViewer.parent ? splatViewer.parent.type : 'null'));
+        } catch (ee) {
+          console.warn('[splat] bbox dump failed: ' + ee.message);
+        }
+        // Two-second follow-up diagnostic — after a couple of frames
+        // the library should have run its sort worker and become
+        // splatRenderReady. If it hasn't, the scene will never draw
+        // pixels even though everything looks correct from outside.
+        setTimeout(() => {
+          try {
+            const innerViewer = viewer.viewer || viewer;
+            const sm = innerViewer.splatMesh;
+            console.log('[splat][2s] initialized=' + innerViewer.initialized +
+              ' splatRenderReady=' + innerViewer.splatRenderReady +
+              ' hasSortWorker=' + !!innerViewer.sortWorker +
+              ' splatMesh=' + !!sm);
+            if (sm) {
+              const count = sm.getSplatCount ? sm.getSplatCount() :
+                (sm.splatDataTextures ? 'hasDataTextures' : '?');
+              console.log('[splat][2s] splatCount=' + count +
+                ' material=' + (sm.material ? sm.material.type : 'none') +
+                ' visible=' + sm.visible +
+                ' frustumCulled=' + sm.frustumCulled);
+              // Material details — blending mode, transparent, etc.
+              if (sm.material) {
+                const m = sm.material;
+                console.log('[splat][2s] mat blending=' + m.blending +
+                  ' transparent=' + m.transparent +
+                  ' depthWrite=' + m.depthWrite +
+                  ' depthTest=' + m.depthTest +
+                  ' side=' + m.side);
+              }
+            }
+            // Render info: draw calls and triangle count on the most
+            // recent frame. If calls==0 after a second of animation,
+            // the splat pass is being skipped entirely.
+            const ri = renderer.info.render;
+            console.log('[splat][2s] renderer.info frame=' + renderer.info.frame +
+              ' calls=' + ri.calls + ' triangles=' + ri.triangles +
+              ' points=' + ri.points);
+          } catch (ee) {
+            console.warn('[splat][2s] probe failed: ' + ee.message);
+          }
+        }, 2000);
+        notify('splat', { status: 'ready' });
+      } catch (e) {
+        splatFailed = true;
+        const reason = e && e.message ? e.message : String(e);
+        const stack = e && e.stack ? e.stack : '';
+        console.error('[splat] load failed:', reason, '\n', stack);
+        notify('splat', { status: 'failed', reason });
+        // Fall back to the procedural lab so the Workshop still has a
+        // backdrop when the splat couldn't load (no network, blocked
+        // CORS, etc). Honor the most recent toggle — if the user has
+        // already turned env off, leave it off.
+        envGroup.visible = envDesiredOn;
+      }
+    })();
+    return splatLoadPromise;
+  }
+
+  /* =====================================================================
+   * Maker Workshop environment — procedural FALLBACK that renders when
+   * the Gaussian splat scene can't load (offline, CORS, 404). Built
+   * from primitives so we ship no extra assets. Layout (radius in
+   * world units):
+   *
+   *     r=0        pedestal ring + fake shadow (model sits here)
+   *     r=0–6      dark floor plane + concentric blueprint grid rings
+   *     r=3–7      four workbench silhouettes at the cardinal points
+   *     r=11       16 vertical accent light columns (backdrop wall)
+   *     r=8        overhead hex truss + spot-style lamps
+   *     sky        large inverted sphere with near-black fog gradient
+   *     dust       ~180 slow-drifting particles catching the key light
+   *
+   * Exposed via window.Nebula.setEnvironment(on) — toggled from the
+   * Workshop page. ticks() drives the slow animation (particle drift,
+   * accent pulse) so the scene feels alive even when the camera is
+   * still.
+   * ===================================================================== */
+  const envGroup = new THREE.Group();
+  envGroup.name = 'workshop-env';
+  envGroup.visible = false;   // off until the page explicitly opts in
+  scene.add(envGroup);
+
+  // --- Sky dome. BackSide sphere with a top-to-bottom gradient baked
+  // into vertex colors (avoids a custom shader).
+  {
+    const skyGeom = new THREE.SphereGeometry(48, 32, 20);
+    const colors = [];
+    const top = new THREE.Color(0x0B0B12);
+    const mid = new THREE.Color(0x161620);
+    const bot = new THREE.Color(0x050507);
+    const pos = skyGeom.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i) / 48;           // normalized -1..1
+      let c;
+      if (y > 0) c = mid.clone().lerp(top, Math.min(1, y * 1.2));
+      else       c = mid.clone().lerp(bot, Math.min(1, -y * 1.2));
+      colors.push(c.r, c.g, c.b);
+    }
+    skyGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const skyMat = new THREE.MeshBasicMaterial({
+      vertexColors: true, side: THREE.BackSide, depthWrite: false
+    });
+    const sky = new THREE.Mesh(skyGeom, skyMat);
+    envGroup.add(sky);
+  }
+
+  // --- Floor platform.
+  {
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(13, 96),
+      new THREE.MeshStandardMaterial({
+        color: 0x16161C, roughness: 0.88, metalness: 0.15
+      })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.01;
+    floor.receiveShadow = true;
+    envGroup.add(floor);
+
+    // Concentric blueprint rings (fade with distance).
+    for (let i = 1; i <= 6; i++) {
+      const r = i * 1.9;
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(r - 0.02, r, 96),
+        new THREE.MeshBasicMaterial({
+          color: 0x2E6BF6,
+          transparent: true,
+          opacity: Math.max(0.04, 0.22 - i * 0.03),
+          depthWrite: false
+        })
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0;
+      envGroup.add(ring);
+    }
+
+    // 8 radial spokes for a blueprint-y floor feel.
+    const spokePts = [];
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      spokePts.push(new THREE.Vector3(Math.cos(a) * 1.4, 0.001, Math.sin(a) * 1.4));
+      spokePts.push(new THREE.Vector3(Math.cos(a) * 11,  0.001, Math.sin(a) * 11));
+    }
+    const spokeGeom = new THREE.BufferGeometry().setFromPoints(spokePts);
+    envGroup.add(new THREE.LineSegments(spokeGeom,
+      new THREE.LineBasicMaterial({
+        color: 0x27272A, transparent: true, opacity: 0.55
+      })));
+  }
+
+  // --- Central pedestal ring (brand accent).
+  const envPedestalMat = new THREE.MeshBasicMaterial({
+    color: 0xFF4D33, transparent: true, opacity: 0.7, depthWrite: false
+  });
+  const envPedestal = new THREE.Mesh(
+    new THREE.RingGeometry(1.18, 1.28, 96), envPedestalMat);
+  envPedestal.rotation.x = -Math.PI / 2;
+  envPedestal.position.y = 0.003;
+  envGroup.add(envPedestal);
+
+  // Inner dim ring.
+  {
+    const inner = new THREE.Mesh(
+      new THREE.RingGeometry(0.95, 1.00, 96),
+      new THREE.MeshBasicMaterial({
+        color: 0x2E6BF6, transparent: true, opacity: 0.45, depthWrite: false
+      }));
+    inner.rotation.x = -Math.PI / 2;
+    inner.position.y = 0.004;
+    envGroup.add(inner);
+  }
+
+  // --- Vertical light columns around the perimeter.
+  const envColumns = [];
+  {
+    const N = 18;
+    for (let i = 0; i < N; i++) {
+      const angle = (i / N) * Math.PI * 2;
+      const r = 11.2;
+      const isAccent = i % 6 === 0;
+      const mat = new THREE.MeshBasicMaterial({
+        color: isAccent ? 0xFF4D33 : 0x3E78E8,
+        transparent: true,
+        opacity: isAccent ? 0.32 : 0.18,
+        depthWrite: false
+      });
+      const col = new THREE.Mesh(new THREE.PlaneGeometry(0.09, 5.8), mat);
+      col.position.set(Math.cos(angle) * r, 1.6, Math.sin(angle) * r);
+      col.lookAt(0, 1.6, 0);
+      envGroup.add(col);
+      envColumns.push({ mat, phase: i * 0.5, accent: isAccent });
+    }
+  }
+
+  // --- Workbench silhouettes at 4 cardinal points (5.5m out).
+  {
+    const benchMat = new THREE.MeshStandardMaterial({
+      color: 0x0E0E14, roughness: 0.75, metalness: 0.4
+    });
+    const legMat = new THREE.MeshStandardMaterial({
+      color: 0x18181C, roughness: 0.7, metalness: 0.5
+    });
+    const edgeMat = new THREE.MeshBasicMaterial({
+      color: 0x2E6BF6, transparent: true, opacity: 0.55, depthWrite: false
+    });
+    const benchPlaces = [
+      { x:  5.5, z:  0.0, ry: -Math.PI / 2 },
+      { x: -5.5, z:  0.0, ry:  Math.PI / 2 },
+      { x:  0.0, z:  5.5, ry:  Math.PI     },
+      { x:  0.0, z: -5.5, ry:  0           }
+    ];
+    for (const pl of benchPlaces) {
+      const g = new THREE.Group();
+      // Top slab.
+      const top = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.1, 0.9), benchMat);
+      top.position.y = 0.95;
+      top.receiveShadow = true;
+      g.add(top);
+      // Legs.
+      const legGeom = new THREE.BoxGeometry(0.08, 0.95, 0.08);
+      const legOffsets = [
+        [ 1.15, 0.45, 0.4], [-1.15, 0.45, 0.4],
+        [ 1.15, 0.45,-0.4], [-1.15, 0.45,-0.4]
+      ];
+      for (const o of legOffsets) {
+        const leg = new THREE.Mesh(legGeom, legMat);
+        leg.position.set(o[0], o[1], o[2]);
+        g.add(leg);
+      }
+      // Edge light strip along the front.
+      const edge = new THREE.Mesh(new THREE.BoxGeometry(2.35, 0.015, 0.02), edgeMat);
+      edge.position.set(0, 0.96, 0.44);
+      g.add(edge);
+      // Tool rack uprights (two thin posts).
+      const postMat = new THREE.MeshStandardMaterial({
+        color: 0x0A0A0E, roughness: 0.7, metalness: 0.5
+      });
+      const postGeom = new THREE.BoxGeometry(0.05, 1.2, 0.05);
+      for (const xoff of [-0.9, 0.9]) {
+        const post = new THREE.Mesh(postGeom, postMat);
+        post.position.set(xoff, 1.6, -0.35);
+        g.add(post);
+      }
+      // Rack shelf.
+      const shelf = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.04, 0.18), benchMat);
+      shelf.position.set(0, 2.15, -0.35);
+      g.add(shelf);
+      g.position.set(pl.x, 0, pl.z);
+      g.rotation.y = pl.ry;
+      envGroup.add(g);
+    }
+  }
+
+  // --- Overhead hex truss (thin line art).
+  {
+    const hexPts = [];
+    const baseY = 4.8;
+    const outerR = 8.0;
+    const midR   = 5.2;
+    const innerR = 2.6;
+    function hexRing(r) {
+      for (let i = 0; i < 6; i++) {
+        const a1 = (i / 6) * Math.PI * 2;
+        const a2 = ((i + 1) / 6) * Math.PI * 2;
+        hexPts.push(new THREE.Vector3(Math.cos(a1) * r, baseY, Math.sin(a1) * r));
+        hexPts.push(new THREE.Vector3(Math.cos(a2) * r, baseY, Math.sin(a2) * r));
+      }
+    }
+    hexRing(outerR); hexRing(midR); hexRing(innerR);
+    // Spokes connecting rings.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      hexPts.push(new THREE.Vector3(Math.cos(a) * innerR, baseY, Math.sin(a) * innerR));
+      hexPts.push(new THREE.Vector3(Math.cos(a) * outerR, baseY, Math.sin(a) * outerR));
+    }
+    const hexGeom = new THREE.BufferGeometry().setFromPoints(hexPts);
+    envGroup.add(new THREE.LineSegments(hexGeom,
+      new THREE.LineBasicMaterial({
+        color: 0x52525B, transparent: true, opacity: 0.55
+      })));
+  }
+
+  // --- Spot-style overhead lamp glows (three, arranged triangularly).
+  {
+    for (const off of [[2.2, -1.3], [-2.2, -1.3], [0, 2.6]]) {
+      const lamp = new THREE.Mesh(
+        new THREE.CircleGeometry(0.45, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0xFFE8B5, transparent: true, opacity: 0.75, depthWrite: false
+        })
+      );
+      lamp.rotation.x = Math.PI / 2;   // face down
+      lamp.position.set(off[0], 4.78, off[1]);
+      envGroup.add(lamp);
+      // Light cone volume (faint).
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(1.4, 4.5, 24, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: 0xFFE8B5, transparent: true, opacity: 0.04,
+          side: THREE.DoubleSide, depthWrite: false
+        })
+      );
+      cone.position.set(off[0], 2.55, off[1]);
+      envGroup.add(cone);
+    }
+  }
+
+  // --- Ambient particles drifting upward.
+  const envParticles = (() => {
+    const N = 200;
+    const geom = new THREE.BufferGeometry();
+    const positions = new Float32Array(N * 3);
+    const speeds = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const r = Math.random() * 8 + 1;
+      const a = Math.random() * Math.PI * 2;
+      positions[i*3]     = Math.cos(a) * r;
+      positions[i*3 + 1] = Math.random() * 5 + 0.2;
+      positions[i*3 + 2] = Math.sin(a) * r;
+      speeds[i] = 0.0025 + Math.random() * 0.005;
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({
+      color: 0xAEC4F0, size: 0.055, transparent: true, opacity: 0.45,
+      depthWrite: false, sizeAttenuation: true
+    });
+    const pts = new THREE.Points(geom, mat);
+    envGroup.add(pts);
+    return { pts, speeds, N };
+  })();
+
+  // --- Workshop-scene animation driver. Advances each frame when env
+  // is visible; no-ops when it's off so we don't spend GPU on idle
+  // AR-passthrough mode.
+  let envTick = 0;
+  function updateEnvironment() {
+    if (!envGroup.visible) return;
+    envTick += 1 / 60;
+    // Slow pulse on accent columns so the backdrop feels alive.
+    for (const c of envColumns) {
+      const base = c.accent ? 0.32 : 0.18;
+      const amp  = c.accent ? 0.14 : 0.06;
+      c.mat.opacity = base + Math.sin(envTick * 1.1 + c.phase) * amp;
+    }
+    // Pedestal breathing.
+    envPedestalMat.opacity = 0.58 + Math.sin(envTick * 1.6) * 0.18;
+    // Particle drift — rise, then loop back to the floor.
+    const pos = envParticles.pts.geometry.attributes.position;
+    for (let i = 0; i < envParticles.N; i++) {
+      let y = pos.getY(i) + envParticles.speeds[i];
+      if (y > 5.2) y = 0.2;
+      pos.setY(i, y);
+    }
+    pos.needsUpdate = true;
+  }
+
+  /* ----------- part builders (shared shapes) ----------- */
+
+  function tintedColor(hex) {
+    // Near-white materials would vanish on a light sky. Darken bright colors
+    // and lean them slightly toward slate so every part stays visible.
+    const col = new THREE.Color(hex || '#FFFFFF');
+    const lum = 0.299 * col.r + 0.587 * col.g + 0.114 * col.b;
+    if (lum > 0.82) {
+      col.multiplyScalar(0.74);
+      col.lerp(new THREE.Color(0x8FA1C2), 0.18);
+    } else if (lum > 0.7) {
+      col.multiplyScalar(0.86);
+    }
+    return col;
+  }
+
+  function mat(hex, emissive) {
+    return new THREE.MeshStandardMaterial({
+      color: tintedColor(hex),
+      roughness: 0.38,
+      metalness: 0.3,
+      emissive: new THREE.Color(emissive || 0x000000),
+      emissiveIntensity: emissive ? 0.2 : 0
+    });
+  }
+  function accent(color) {
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(color),
+      roughness: 0.5, metalness: 0.4
+    });
+  }
+
+  function makeNose(p) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.ConeGeometry(p.radiusBottom, p.height, 48), mat(p.color));
+    m.castShadow = true; m.receiveShadow = true; g.add(m);
+    const r = new THREE.Mesh(new THREE.TorusGeometry(p.radiusBottom*0.98, 0.012, 12, 48), accent(p.accent));
+    r.rotation.x = Math.PI/2; r.position.y = -p.height/2 + 0.02; g.add(r);
+    return g;
+  }
+  function makeFairing(p) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.ConeGeometry(p.radiusBottom, p.height, 48), mat(p.color));
+    m.castShadow = true; g.add(m);
+    const seam = new THREE.Mesh(new THREE.BoxGeometry(0.01, p.height*0.94, 0.018), accent(p.accent));
+    const seam2 = seam.clone();
+    seam.position.x = p.radiusBottom * 0.95;
+    seam2.position.x = -p.radiusBottom * 0.95;
+    g.add(seam); g.add(seam2);
+    return g;
+  }
+  function makeStage(p) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radiusTop, p.radiusBottom, p.height, 48), mat(p.color));
+    m.castShadow = true; m.receiveShadow = true; g.add(m);
+    const stripe = new THREE.Mesh(
+      new THREE.CylinderGeometry(p.radiusBottom*1.003, p.radiusTop*1.003, p.height*0.06, 48),
+      accent(p.accent)
+    );
+    stripe.position.y = p.height*0.35; g.add(stripe);
+    return g;
+  }
+  function makeInterstage(p) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radiusTop, p.radiusBottom, p.height, 48), mat(p.color));
+    m.castShadow = true; g.add(m);
+    for (const y of [-p.height/2 + 0.04, p.height/2 - 0.04]) {
+      const r = new THREE.Mesh(new THREE.TorusGeometry(p.radiusTop*1.02, 0.018, 12, 48), accent(p.accent));
+      r.rotation.x = Math.PI/2; r.position.y = y; g.add(r);
+    }
+    return g;
+  }
+  function makePayload(p) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radiusTop, p.radiusBottom, p.height, 48), mat(p.color));
+    m.castShadow = true; g.add(m);
+    return g;
+  }
+  function makeBooster(p, side) {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(p.radiusTop, p.radiusBottom, p.height, 32), mat(p.color));
+    m.castShadow = true; g.add(m);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(p.radiusTop, p.radiusTop*1.6, 32), mat(p.color));
+    cone.position.y = p.height/2 + (p.radiusTop*0.8); g.add(cone);
+    g.position.x = side === 'left' ? -0.9 : 0.9;
+    return g;
+  }
+  function makeEngine(p) {
+    const g = new THREE.Group();
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(p.radiusTop, p.radiusBottom, p.height, 48),
+      new THREE.MeshStandardMaterial({ color: 0xB0B9CC, roughness: 0.3, metalness: 0.75 })
+    );
+    base.castShadow = true; g.add(base);
+    const nozGeom = new THREE.CylinderGeometry(0.08, 0.14, 0.26, 24, 1, true);
+    const nozMat = new THREE.MeshStandardMaterial({ color: 0x8F9AB5, roughness: 0.4, metalness: 0.55, side: THREE.DoubleSide });
+    for (const [x,z] of [[0,0],[0.35,0],[-0.35,0],[0,0.35],[0,-0.35]]) {
+      const n = new THREE.Mesh(nozGeom, nozMat);
+      n.position.set(x, -p.height/2 - 0.13, z); g.add(n);
+    }
+    return g;
+  }
+  function makeSolar(p, side) {
+    const g = new THREE.Group();
+    const panel = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6, p.height, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x132A75, roughness: 0.3, metalness: 0.6 })
+    );
+    panel.castShadow = true; g.add(panel);
+    const tex = cellTexture();
+    const cells = new THREE.Mesh(new THREE.PlaneGeometry(1.48, p.height*0.92),
+      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.45, metalness: 0.25 }));
+    cells.position.z = 0.021; g.add(cells);
+    g.position.x = side === 'left' ? -1.3 : 1.3;
+    g.rotation.z = side === 'left' ? -Math.PI/2 : Math.PI/2;
+    return g;
+  }
+  function cellTexture() {
+    const c = document.createElement('canvas'); c.width=128; c.height=512;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#132A75'; ctx.fillRect(0,0,128,512);
+    ctx.fillStyle = '#1F4AD2';
+    for (let y=0; y<512; y+=20) for (let x=0; x<128; x+=20) ctx.fillRect(x+2,y+2,16,16);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace; return t;
+  }
+  function makeAntenna(p) {
+    const g = new THREE.Group();
+    const dish = new THREE.Mesh(
+      new THREE.SphereGeometry(p.radiusBottom, 32, 16, 0, Math.PI*2, 0, Math.PI/2.5),
+      new THREE.MeshStandardMaterial({ color: 0xFBFCFE, roughness: 0.3, metalness: 0.35, side: THREE.DoubleSide })
+    );
+    dish.rotation.x = Math.PI; dish.castShadow = true; g.add(dish);
+    const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, p.height, 12), accent(p.accent));
+    stand.position.y = -p.height/2; g.add(stand);
+    return g;
+  }
+  function makeBus(p) {
+    const g = new THREE.Group();
+    const core = new THREE.Mesh(new THREE.BoxGeometry(p.radiusBottom*1.5, p.height, p.radiusBottom*1.5), mat(p.color));
+    core.castShadow = true; g.add(core);
+    const edgeMat = accent(p.accent);
+    const bev = 0.02, w=p.radiusBottom*1.5, h=p.height;
+    for (const [x,z] of [[w/2,0],[-w/2,0],[0,w/2],[0,-w/2]]) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(bev, h, bev), edgeMat);
+      bar.position.set(x, 0, z); g.add(bar);
+    }
+    return g;
+  }
+
+  function buildMesh(p) {
+    const side = (p.display || '').endsWith('左') ? 'left' : 'right';
+    switch (p.kind) {
+      case 'nose': return makeNose(p);
+      case 'fairing': return makeFairing(p);
+      case 'payload': return makePayload(p);
+      case 'interstage': return makeInterstage(p);
+      case 'stage': return makeStage(p);
+      case 'booster': return makeBooster(p, side);
+      case 'engine': return makeEngine(p);
+      case 'solar': return makeSolar(p, side);
+      case 'antenna': return makeAntenna(p);
+      case 'bus': return makeBus(p);
+      default: return makePayload(p);
+    }
+  }
+
+  function rebuild() {
+    while (rocket.children.length > 0) {
+      const c = rocket.children[0]; rocket.remove(c);
+    }
+    state.meshes.clear();
+
+    const stackKinds = ['nose','payload','fairing','interstage','stage','engine','bus'];
+    const hasFairing = state.parts.find(p => p.kind === 'fairing');
+    let stack = state.parts
+      .filter(p => stackKinds.includes(p.kind) && p.kind !== 'fairing')
+      .sort((a,b) => stackKinds.indexOf(a.kind) - stackKinds.indexOf(b.kind));
+    if (hasFairing) {
+      stack = stack.filter(p => p.kind !== 'nose' && p.kind !== 'payload');
+      stack.unshift(hasFairing);
+    }
+    const sides = state.parts.filter(p => ['booster','solar','antenna'].includes(p.kind));
+
+    // build bottom-to-top
+    const ordered = stack.slice().reverse();
+    let cursor = 0;
+    for (const p of ordered) {
+      const mesh = buildMesh(p);
+      mesh.position.y = cursor + p.height/2;
+      state.meshes.set(p.id, { mesh, base: mesh.position.clone(), partId: p.id });
+      rocket.add(mesh);
+      cursor += p.height;
+    }
+    const midY = cursor / 2;
+    for (const p of sides) {
+      const mesh = buildMesh(p);
+      mesh.position.y = midY + (mesh.position.y || 0);
+      state.meshes.set(p.id, { mesh, base: mesh.position.clone(), partId: p.id });
+      rocket.add(mesh);
+    }
+    applyExplode(state.explode);
+
+    // Compute stacked world height so we can pin the model's vertical center
+    // at world Y = 0 regardless of which rocket / satellite is loaded.
+    let localStack = 0;
+    for (const p of ordered) localStack += p.height;
+    state.stackHeight = localStack * ROCKET_SCALE;
+
+    // Re-center anchor so rocket body is balanced around y = 0. Long-press
+    // changes anchor.x/z only; this line resets anchor.y to match current model.
+    anchor.position.y = -state.stackHeight * 0.5;
+
+    state.frameYOffset = Math.max(0.35, state.stackHeight * 0.22);
+    // Frame off the actual world-space bbox of everything we just built.
+    // For tall rockets this reduces to ~stackHeight; for satellites with
+    // solar wings the horizontal span can dominate, and without this
+    // the custom build would render tiny (wings clipped or frame too
+    // close). Aspect-aware like the GLB path.
+    {
+      const box = new THREE.Box3().setFromObject(rocket);
+      const size = new THREE.Vector3();
+      if (!box.isEmpty()) box.getSize(size);
+      const W = size.x > 0 ? size.x : state.stackHeight;
+      const H = size.y > 0 ? size.y : state.stackHeight;
+      const cW = renderer.domElement.clientWidth || window.innerWidth || 1;
+      const cH = renderer.domElement.clientHeight || window.innerHeight || 1;
+      const aspect = cW / cH;
+      const vHalfTan = Math.tan((camera.fov * Math.PI / 180) / 2);
+      const hHalfTan = vHalfTan * aspect;
+      const dV = vHalfTan > 0 ? (H / 2 + state.frameYOffset) / vHalfTan : 0;
+      const dH = hHalfTan > 0 ? (W / 2) / hHalfTan : 0;
+      const dFit = Math.max(dV, dH);
+      state.frameRadius = Math.max(1.4, dFit * 1.15);
+    }
+    state.orbitRadius = state.frameRadius;
+
+    notify('build', state.parts.map(p => ({
+      partId: p.id, kind: p.kind, display: p.display,
+      color: p.color, height: p.height, radiusTop: p.radiusTop, radiusBottom: p.radiusBottom
+    })));
+  }
+
+  function applyExplode(ratio) {
+    state.explode = ratio;
+    for (const entry of state.meshes.values()) {
+      const p = state.parts.find(x => x.id === entry.partId);
+      const off = (p && p.explodeOffset) || { x: 0, y: 0.2, z: 0 };
+      entry.mesh.position.set(
+        entry.base.x + off.x * ratio,
+        entry.base.y + off.y * ratio,
+        entry.base.z + off.z * ratio
+      );
+    }
+  }
+
+  function highlight(partId) {
+    for (const [id, entry] of state.meshes.entries()) {
+      const mesh = entry.mesh.children[0];
+      if (!mesh || !mesh.material) continue;
+      mesh.material.emissive = new THREE.Color(id === partId ? 0x2E6BF6 : 0x000000);
+      mesh.material.emissiveIntensity = id === partId ? 0.3 : 0.0;
+      mesh.material.needsUpdate = true;
+    }
+  }
+
+  function notify(event, payload) {
+    try {
+      if (window.nebula && window.nebula.postMessage) {
+        window.nebula.postMessage(JSON.stringify({ event, payload }));
+      }
+    } catch (e) {}
+  }
+
+  /* ----------- camera pose -----------
+     Two modes:
+       touch  — camera orbits on a sphere around the anchor. yaw/pitch are
+                controlled by directional buttons and drag gestures. Default.
+       motion — camera sits at world origin and is rotated by device sensors,
+                using the first sensor sample as a reference frame so the user
+                starts looking straight at the anchor. */
+  function applyCamera() {
+    // Camera orbits state.orbitTarget — NOT anchor.position — so when the
+    // user drags the rocket the anchor slides away from the orbit center
+    // and the rocket visibly moves across the screen. snapCameraToAnchor()
+    // re-syncs orbitTarget to the current anchor when you load a new
+    // model or explicitly recenter.
+    const tx = state.orbitTarget.x;
+    const ty = state.orbitTarget.y;
+    const tz = state.orbitTarget.z;
+
+    if (state.controlMode === 'motion' && state.orientationEnabled) {
+      // Wrap helper — keeps deltas in [-180, 180] so crossing the 0°/360°
+      // boundary of alpha doesn't produce a 350° jump.
+      function wrap(v) {
+        while (v > 180) v -= 360;
+        while (v < -180) v += 360;
+        return v;
+      }
+      // Per-frame delta (not absolute-from-initial), so a continuous phone
+      // turn keeps accumulating orbit past 360° — user walks all the way
+      // around the rocket by rotating in place.
+      if (state.yawRef === null) {
+        state.yawRef = state.yaw;
+        state.pitchRef = state.pitch;
+      }
+      const fDYaw = wrap(state.yaw - state.yawRef);
+      const fDPitch = wrap(state.pitch - state.pitchRef);
+      state.yawRef = state.yaw;
+      state.pitchRef = state.pitch;
+      state.orbitYaw += THREE.MathUtils.degToRad(fDYaw);
+      const nextPitch = state.orbitPitch + THREE.MathUtils.degToRad(fDPitch);
+      state.orbitPitch = Math.max(-1.2, Math.min(1.2, nextPitch));
+      // Fall through to orbit renderer below — camera still orbits the
+      // fixed anchor, so the rocket stays put in world space and the
+      // viewer moves around it.
+    }
+    // Orbit mode
+    const r = state.orbitRadius;
+    const cPitch = Math.cos(state.orbitPitch);
+    camera.position.set(
+      tx + r * Math.sin(state.orbitYaw) * cPitch,
+      ty + r * Math.sin(state.orbitPitch),
+      tz + r * Math.cos(state.orbitYaw) * cPitch
+    );
+    camera.up.set(0, 1, 0);
+    camera.lookAt(tx, ty, tz);
+  }
+
+  /* ----------- placement: long-press to re-anchor -----------
+     We ray-cast from the touched pixel through the camera and intersect with
+     a horizontal plane at the anchor's current Y level. That plane IS "the
+     floor of the AR scene", so the rocket lands under the user's finger. */
+  const _anchorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const _anchorHit = new THREE.Vector3();
+  const _anchorRay = new THREE.Raycaster();
+
+  function placeAnchor(clientX, clientY) {
+    // Raycast from finger through the camera into the ground plane (y at
+    // anchor's level). The anchor group contains the rocket, so moving
+    // anchor.x/z slides the whole model across the world.
+    //
+    // IMPORTANT: we translate the orbit target by the SAME delta so the
+    // camera follows the model in lock-step. Previously the target was
+    // fixed while the anchor moved, which changed the model-to-camera
+    // distance and made the rocket visibly shrink / grow through
+    // perspective — looking like an unintended zoom during drag. Now
+    // dragging simply slides the model across the AR floor at a
+    // constant apparent size.
+    const rect = canvas.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+    _anchorRay.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+    _anchorPlane.set(new THREE.Vector3(0, 1, 0), -anchor.position.y);
+    const hit = _anchorRay.ray.intersectPlane(_anchorPlane, _anchorHit);
+    const oldX = anchor.position.x;
+    const oldZ = anchor.position.z;
+    if (hit) {
+      anchor.position.x = hit.x;
+      anchor.position.z = hit.z;
+    } else {
+      const origin = camera.position.clone();
+      const dir = _anchorRay.ray.direction.clone().normalize();
+      const p = origin.add(dir.multiplyScalar(state.anchorDistance));
+      anchor.position.x = p.x;
+      anchor.position.z = p.z;
+    }
+    // Keep camera distance to model constant. Only translate X/Z — Y is
+    // owned by the frame-offset math (state.frameYOffset) so the model
+    // still rides high in the visible area above the bottom UI panel.
+    state.orbitTarget.x += (anchor.position.x - oldX);
+    state.orbitTarget.z += (anchor.position.z - oldZ);
+    anchor.visible = true;
+    state.anchored = true;
+    reticle.classList.add('ok');
+    setTimeout(() => { hint.classList.remove('show'); reticle.classList.remove('show'); }, 200);
+    notify('anchor', { x: anchor.position.x, y: anchor.position.y, z: anchor.position.z });
+  }
+
+  /* ----------- interaction -----------
+     Tap-only: a short tap selects a part (or deselects on miss).
+     Drag-to-reposition was removed — navigation is fully driven by the
+     joysticks now, so finger drag on the canvas no longer moves the
+     anchor or shows a "拖动中 · 松开定位" indicator. The placeAnchor()
+     helper is left in place in case a "回到起点 / re-anchor" button
+     wants to call it later. */
+  const MOVE_THRESHOLD = 8;
+  let tap = null;
+
+  function pointFromEvent(e) {
+    const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function onTouchStart(x, y) {
+    tap = { t: Date.now(), startX: x, startY: y };
+  }
+  function onTouchEnd(x, y) {
+    if (!tap) return;
+    const dx = x - tap.startX;
+    const dy = y - tap.startY;
+    const moved = Math.hypot(dx, dy) > MOVE_THRESHOLD;
+    const dt = Date.now() - tap.t;
+    if (!moved && dt < 400) handleTap(x, y);
+    tap = null;
+  }
+  canvas.addEventListener('touchstart', (e) => {
+    const p = pointFromEvent(e); onTouchStart(p.x, p.y);
+  }, { passive: true });
+  canvas.addEventListener('touchend', (e) => {
+    const p = pointFromEvent(e); onTouchEnd(p.x, p.y);
+  });
+  canvas.addEventListener('mousedown', (e) => { onTouchStart(e.clientX, e.clientY); });
+  canvas.addEventListener('mouseup', (e) => { onTouchEnd(e.clientX, e.clientY); });
+
+  function handleTap(x, y) {
+    // Short tap = select a part (or deselect on miss). To reposition the
+    // rocket, drag your finger — any motion > MOVE_THRESHOLD enters
+    // drag-to-place mode (see onDragMove).
+    const rect = canvas.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((x - rect.left) / rect.width) * 2 - 1,
+      -((y - rect.top) / rect.height) * 2 + 1
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(pointer, camera);
+    const hits = ray.intersectObjects(rocket.children, true);
+    if (hits.length > 0) {
+      let chosen = null;
+      const hitObj = hits[0].object;
+      for (const [id, entry] of state.meshes.entries()) {
+        if (entry.mesh === hitObj || entry.mesh.getObjectById(hitObj.id)) { chosen = id; break; }
+      }
+      if (chosen) {
+        state.selected = chosen; highlight(chosen);
+        notify('select', { partId: chosen });
+        return;
+      }
+    }
+    highlight(null);
+    state.selected = null;
+    notify('select', null);
+  }
+
+  /* ----------- resize ----------- */
+  function resize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    if (!w || !h) return;
+    // third arg `true` updates canvas.style.width/height as well so the
+    // rendered image is always pinned to the full viewport — some ArkWeb
+    // builds don't honour inset:0 the way we'd expect.
+    renderer.setSize(w, h, true);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  function resizeIfNeeded() {
+    const w = window.innerWidth, h = window.innerHeight;
+    if (!w || !h) return;
+    const pr = renderer.getPixelRatio();
+    const expectedW = Math.floor(w * pr);
+    const expectedH = Math.floor(h * pr);
+    if (canvas.width !== expectedW || canvas.height !== expectedH) {
+      resize();
+    }
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  /* ----------- tick ----------- */
+  const clock = new THREE.Clock();
+  function tick() {
+    const dt = clock.getDelta();
+    // The ArkWeb WebView sometimes delivers its final layout after our first
+    // resize(), which leaves the camera aspect wrong and renders the model
+    // in a corner. Re-check every frame — this is cheap if nothing changed.
+    resizeIfNeeded();
+    applyCamera();
+    // Reticle + hint only show if user explicitly resets anchor via host API.
+    if (!state.anchored) {
+      reticle.classList.add('show');
+      hint.classList.add('show');
+    } else {
+      reticle.classList.remove('show');
+      hint.classList.remove('show');
+    }
+    // subtle breathing ring while anchored
+    if (state.anchored) {
+      ring1.scale.setScalar(1.0 + Math.sin(clock.elapsedTime * 1.3) * 0.02);
+      ring2.scale.setScalar(1.0 + Math.sin(clock.elapsedTime * 1.1 + 0.6) * 0.03);
+    }
+    updateEnvironment();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  function snapCameraToAnchor() {
+    state.orbitYaw = 0;
+    state.orbitPitch = 0;
+    state.orbitRadius = state.frameRadius;
+    // Rocket is centered at world y = 0, but the bottom ~30% of the
+    // screen is covered by the part-pills / slider / dock overlay, so
+    // the user's visible "stage" is the top ~70%. Aim the orbit target
+    // slightly BELOW the model (state.frameYOffset) so the rocket rides
+    // higher in frame instead of getting buried behind the UI.
+    state.orbitTarget.set(
+      anchor.position.x,
+      -state.frameYOffset,
+      anchor.position.z
+    );
+  }
+
+  // GLB loading helper — only invoked when a model URL is provided by host.
+  // GLTFLoader is now an ES-module import (three's example addons
+  // dropped their UMD builds around r153), so this is a direct
+  // instantiation rather than a `THREE.GLTFLoader` lookup.
+  const gltfLoader = new GLTFLoader();
+  let loadedModel = null;
+
+  function clearRocketChildren() {
+    while (rocket.children.length > 0) {
+      const c = rocket.children[0];
+      rocket.remove(c);
+    }
+    if (loadedModel) loadedModel = null;
+    state.meshes.clear();
+  }
+
+  function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const len = binary.length;
+    const buf = new Uint8Array(len);
+    for (let i = 0; i < len; i++) buf[i] = binary.charCodeAt(i);
+    return buf.buffer;
+  }
+
+  function frameLoadedModel(model, targetHeight) {
+    // --- Step 1: orient the model so its long axis is screen-visible.
+    // Many NASA meshes (Hubble, Cassini, ISS) are authored with the long
+    // axis along Z. The initial camera (+Z looking toward origin) would
+    // then see them end-on — a dot. If Z is dominant, swing 90° around Y
+    // so the long axis lies along X instead. Tall rockets (Y-major) are
+    // untouched so Saturn V stays upright.
+    const box0 = new THREE.Box3().setFromObject(model);
+    const size0 = new THREE.Vector3(); box0.getSize(size0);
+    if (size0.z > size0.x && size0.z > size0.y) {
+      model.rotation.y = Math.PI / 2;
+    }
+    // --- Step 2: scale by screen-visible dimensions (X, Y) — NOT Z.
+    // Using max(X,Y,Z) as before meant a deep model was scaled down to
+    // fit its depth, leaving almost nothing to see.
+    const boxR = new THREE.Box3().setFromObject(model);
+    const sizeR = new THREE.Vector3(); boxR.getSize(sizeR);
+    const screenMax = Math.max(sizeR.x, sizeR.y);
+    const scale = screenMax > 0 ? (targetHeight / screenMax) : 1;
+    model.scale.setScalar(scale);
+    // --- Step 3: recenter around origin, lift to sit on y=0 baseline.
+    const sbox = new THREE.Box3().setFromObject(model);
+    const center = new THREE.Vector3(); sbox.getCenter(center);
+    model.position.sub(center);
+    const newHeight = (sbox.max.y - sbox.min.y);
+    model.position.y += newHeight * 0.5;
+    model.traverse((child) => {
+      if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
+    });
+    rocket.add(model);
+    loadedModel = model;
+    state.stackHeight = newHeight;
+    anchor.position.y = -state.stackHeight * 0.5;
+    // --- Step 4: compute frame distance from the actual screen aspect
+    // AND the orbit target offset (we aim below the model's center so
+    // the UI panel doesn't bury it). Top of the model is then further
+    // from the camera sight line by `yOffset`, so the vertical fit
+    // needs to account for it or the rocket clips off the top.
+    const finalBox = new THREE.Box3().setFromObject(model);
+    const finalSize = new THREE.Vector3(); finalBox.getSize(finalSize);
+    const W = finalSize.x, H = finalSize.y;
+    state.frameYOffset = Math.max(0.35, newHeight * 0.22);
+    const cW = renderer.domElement.clientWidth || window.innerWidth || 1;
+    const cH = renderer.domElement.clientHeight || window.innerHeight || 1;
+    const aspect = cW / cH;
+    const vHalfTan = Math.tan((camera.fov * Math.PI / 180) / 2);
+    const hHalfTan = vHalfTan * aspect;
+    // Worst-case vertical extent from camera sight line = H/2 + yOffset.
+    const dV = vHalfTan > 0 ? (H / 2 + state.frameYOffset) / vHalfTan : 0;
+    const dH = hHalfTan > 0 ? (W / 2) / hHalfTan : 0;
+    const dFit = Math.max(dV, dH);
+    state.frameRadius = Math.max(1.6, dFit * 1.15);
+    state.orbitRadius = state.frameRadius;
+    snapCameraToAnchor();
+  }
+
+  function parseGltfBase64(base64, targetHeight, label) {
+    if (!gltfLoader) {
+      notify('model-error', { url: label, reason: 'gltf-loader-missing' });
+      return;
+    }
+    clearRocketChildren();
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      notify('model-error', { url: label, reason: 'parse-timeout' });
+    }, 15000);
+    try {
+      const ab = base64ToArrayBuffer(base64);
+      gltfLoader.parse(ab, '',
+        (gltf) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          try {
+            frameLoadedModel(gltf.scene, targetHeight);
+            notify('model-loaded', { url: label });
+          } catch (e) {
+            notify('model-error', { url: label, reason: 'frame:' + (e && e.message ? e.message : 'unknown') });
+          }
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          notify('model-error', { url: label, reason: 'parse-err:' + (err && err.message ? err.message : '?') });
+        }
+      );
+    } catch (e) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      notify('model-error', { url: label, reason: 'decode:' + (e && e.message ? e.message : 'unknown') });
+    }
+  }
+
+  function loadGltf(url, targetHeight) {
+    if (!gltfLoader) {
+      notify('model-error', { url, reason: 'gltf-loader-missing' });
+      return;
+    }
+    clearRocketChildren();
+
+    let settled = false;
+    // Hard 12-second timeout — the overlay is NEVER allowed to stick.
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      notify('model-error', { url, reason: 'timeout' });
+    }, 12000);
+
+    const onProgress = (xhr) => {
+      if (xhr && xhr.lengthComputable) {
+        notify('model-progress', {
+          url,
+          loaded: xhr.loaded || 0,
+          total: xhr.total || 0
+        });
+      }
+    };
+
+    try {
+      gltfLoader.load(url,
+        (gltf) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          try {
+            frameLoadedModel(gltf.scene, targetHeight);
+            notify('model-loaded', { url });
+          } catch (e) {
+            notify('model-error', { url, reason: 'post-load:' + (e && e.message ? e.message : 'unknown') });
+          }
+        },
+        onProgress,
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          const reason = err && err.message ? err.message : 'load-failed';
+          notify('model-error', { url, reason });
+        }
+      );
+    } catch (e) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      notify('model-error', { url, reason: 'exception:' + (e && e.message ? e.message : 'unknown') });
+    }
+  }
+
+  /* ----------- Bridge API ----------- */
+  window.Nebula = {
+    setParts(parts) {
+      state.parts = parts || [];
+      rebuild();                                  // rebuild sets anchor.y
+      anchor.position.x = ANCHOR_DEFAULT.x;
+      anchor.position.z = ANCHOR_DEFAULT.z;
+      anchor.visible = true;
+      state.anchored = true;
+      snapCameraToAnchor();
+    },
+    addPart(part) { state.parts = state.parts.concat(part); rebuild(); },
+    removePart(id) { state.parts = state.parts.filter(p => p.id !== id); rebuild(); },
+    clear() { state.parts = []; rebuild(); },
+    setExplode(r) { applyExplode(r); },
+    selectPart(id) { state.selected = id; highlight(id); },
+    setOrientation(yaw, pitch, roll) {
+      state.yaw = yaw; state.pitch = pitch; state.roll = roll;
+      state.orientationEnabled = true;
+    },
+    resetAnchor() { anchor.visible = false; state.anchored = false; reticle.classList.remove('ok'); },
+    setAnchorDistance(d) { state.anchorDistance = Math.max(0.8, Math.min(6, d)); },
+    // Real 3D model loading — replaces the procedural rocket with a GLB.
+    setModel(url, targetHeight) {
+      loadGltf(url, targetHeight || 1.8);
+      anchor.position.x = ANCHOR_DEFAULT.x;
+      anchor.position.z = ANCHOR_DEFAULT.z;
+      anchor.visible = true;
+      state.anchored = true;
+    },
+    loadBase64Model(base64, targetHeight, label) {
+      parseGltfBase64(base64, targetHeight || 1.8, label || '');
+      anchor.position.x = ANCHOR_DEFAULT.x;
+      anchor.position.z = ANCHOR_DEFAULT.z;
+      anchor.visible = true;
+      state.anchored = true;
+    },
+    loadBundledModel(filename, targetHeight) {
+      // Synchronous proxy call — the ArkTS side reads rawfile & returns base64.
+      // No URL fetching inside the WebView, so nothing for the browser to
+      // cache / CORS / scheme-check.
+      try {
+        if (!window.nebula || typeof window.nebula.getModelBytes !== 'function') {
+          notify('model-error', { url: filename, reason: 'no-bridge' });
+          return;
+        }
+        const b64 = window.nebula.getModelBytes(filename);
+        if (!b64 || b64.length === 0) {
+          notify('model-error', { url: filename, reason: 'empty-bytes' });
+          return;
+        }
+        parseGltfBase64(b64, targetHeight || 1.8, filename);
+        anchor.position.x = ANCHOR_DEFAULT.x;
+        anchor.position.z = ANCHOR_DEFAULT.z;
+        anchor.visible = true;
+        state.anchored = true;
+      } catch (e) {
+        notify('model-error', { url: filename, reason: 'bundled-err:' + (e && e.message ? e.message : '?') });
+      }
+    },
+    startModelTransfer(label, totalChunks, targetHeight) {
+      window._nebModelChunks = new Array(totalChunks);
+      window._nebModelLabel = label || '';
+      window._nebModelHeight = targetHeight || 1.8;
+      window._nebModelReceived = 0;
+      notify('model-transfer-start', { label: window._nebModelLabel, total: totalChunks });
+    },
+    pushModelChunk(index, chunk) {
+      if (!window._nebModelChunks) return;
+      window._nebModelChunks[index] = chunk;
+      window._nebModelReceived = (window._nebModelReceived || 0) + 1;
+    },
+    finishModelTransfer() {
+      if (!window._nebModelChunks) {
+        notify('model-error', { url: '', reason: 'no-transfer-in-progress' });
+        return;
+      }
+      const combined = window._nebModelChunks.join('');
+      const label = window._nebModelLabel || '';
+      const targetHeight = window._nebModelHeight || 1.8;
+      window._nebModelChunks = null;
+      parseGltfBase64(combined, targetHeight, label);
+      anchor.position.x = ANCHOR_DEFAULT.x;
+      anchor.position.z = ANCHOR_DEFAULT.z;
+      anchor.visible = true;
+      state.anchored = true;
+    },
+    clearModel() {
+      clearRocketChildren();
+    },
+    // --- new camera-control API ---
+    setControlMode(mode) {
+      if (mode !== 'touch' && mode !== 'motion') return;
+      state.controlMode = mode;
+      state.yawRef = null;
+      state.pitchRef = null;
+      state.rollRef = null;
+    },
+    orbitBy(dYawDeg, dPitchDeg) {
+      state.orbitYaw += THREE.MathUtils.degToRad(dYawDeg);
+      state.orbitPitch = Math.max(-1.2,
+        Math.min(1.2, state.orbitPitch + THREE.MathUtils.degToRad(dPitchDeg)));
+    },
+    recenterCamera() {
+      state.yawRef = null;
+      state.pitchRef = null;
+      state.rollRef = null;
+      anchor.position.x = ANCHOR_DEFAULT.x;
+      anchor.position.z = ANCHOR_DEFAULT.z;
+      // anchor.y is managed by rebuild() so rocket stays vertically centered
+      anchor.visible = true;
+      state.anchored = true;
+      snapCameraToAnchor();
+    },
+    setOrbitRadius(r) {
+      state.orbitRadius = Math.max(state.orbitRadiusMin, Math.min(state.orbitRadiusMax, r));
+    },
+    zoomBy(factor) {
+      const next = state.orbitRadius * factor;
+      state.orbitRadius = Math.max(state.orbitRadiusMin, Math.min(state.orbitRadiusMax, next));
+    },
+    panTarget(dx, dy, dz) {
+      // Translate orbit target AND anchor together so the camera and
+      // the model move in lock-step. Moving only the target (as before)
+      // would change the camera-to-model distance, which reads on
+      // screen as an unwanted zoom while the user drags.
+      state.orbitTarget.x += dx;
+      state.orbitTarget.y += dy;
+      state.orbitTarget.z += dz;
+      anchor.position.x += dx;
+      anchor.position.z += dz;
+      // Deliberately skip anchor.y — it's owned by rebuild() /
+      // frameLoadedModel so the model stays vertically centered.
+    },
+    // ---------- analog navigation (left/right joysticks + up/down) -----
+    // Step sizes are sized for ~30 Hz call rate driven by JoystickPad
+    // tick timer. WALK/CLIMB use scene-meters per tick; LOOK uses
+    // degrees per tick. Tuned so a fully-deflected joystick traverses
+    // the ISS scene (~13 world units across at our scale) in ~5 s and
+    // a 360° spin in ~2 s, which feels responsive without overshooting.
+    walkMove(forward, right) {
+      const STEP = 0.05;
+      // Camera's facing direction projected to the XZ plane. Mode-agnostic:
+      // works under both touch (orbit) and motion modes because we read
+      // camera.matrixWorld which both modes update.
+      const fwd = new THREE.Vector3();
+      camera.getWorldDirection(fwd);
+      fwd.y = 0;
+      if (fwd.lengthSq() < 1e-6) return;
+      fwd.normalize();
+      // Right-hand perpendicular on the XZ plane.
+      const rt = new THREE.Vector3(-fwd.z, 0, fwd.x);
+      const dx = (fwd.x * forward + rt.x * right) * STEP;
+      const dz = (fwd.z * forward + rt.z * right) * STEP;
+      // Only move the orbit target — the camera follows. Crucially we
+      // do NOT translate `anchor` (unlike panTarget): in env-on mode the
+      // splat scene is parented to anchor, and moving anchor along with
+      // the camera would cancel out the relative motion (the user would
+      // see no movement at all). Keeping anchor fixed means the camera
+      // truly walks through the static scene.
+      state.orbitTarget.x += dx;
+      state.orbitTarget.z += dz;
+    },
+    walkClimb(up) {
+      const STEP = 0.04;
+      state.orbitTarget.y += up * STEP;
+      // Don't touch anchor.y — owned by rebuild() / frameLoadedModel.
+    },
+    lookBy(yawNorm, pitchNorm) {
+      // Map joystick deflection to per-tick rotation. ~3°/tick at full
+      // deflection × 30 Hz ≈ 90°/s, comfortable for browsing the ISS.
+      const STEP_DEG = 3.0;
+      state.orbitYaw += THREE.MathUtils.degToRad(yawNorm * STEP_DEG);
+      const nextPitch = state.orbitPitch +
+        THREE.MathUtils.degToRad(pitchNorm * STEP_DEG);
+      state.orbitPitch = Math.max(-1.2, Math.min(1.2, nextPitch));
+    },
+    // Toggle the workshop backdrop. When ON the WebView renders a
+    // fully opaque scene behind the model:
+    //   1. Try the Gaussian-splat "blacksmith forge" scene (real capture)
+    //   2. If the fetch fails / hasn't finished, render the procedural
+    //      sci-fi maker lab while we wait so the user isn't staring
+    //      at a blank void
+    // When OFF the canvas clears transparent again so the native camera
+    // preview shows through (classic AR passthrough mode).
+    setEnvironment(on) {
+      envDesiredOn = !!on;
+      console.log('[env] setEnvironment(' + on + ') splatReady=' + splatReady +
+        ' splatViewer=' + !!splatViewer);
+      // Hide the foreground rocket/satellite model whenever the splat
+      // backdrop is on — the user wants an unobstructed view of the ISS
+      // capture, with the satellite stepping out of the frame. Goes
+      // back to visible the moment env toggles off.
+      // Belt-and-suspenders: flip .visible AND detach from the anchor.
+      // Just .visible was leaking the procedural satellite through on at
+      // least one device — possibly a stale cached ar.html or a render
+      // pass that re-traversed children. Removing the group from the
+      // scene graph guarantees the meshes can't be drawn.
+      rocket.visible = !on;
+      if (on) {
+        if (rocket.parent === anchor) anchor.remove(rocket);
+      } else {
+        if (rocket.parent !== anchor) anchor.add(rocket);
+      }
+      if (on) {
+        renderer.setClearColor(0x000000, 1);
+        // Show the procedural lab immediately — it stays up until the
+        // splat finishes parsing, then gets hidden. If the splat
+        // already loaded (user toggling off/on), skip straight to it.
+        envGroup.visible = !splatReady;
+        if (splatViewer) splatViewer.visible = true;
+        ensureSplatLoaded().then(() => {
+          console.log('[env] ensureSplatLoaded .then() fired — splatReady=' +
+            splatReady + ' envDesiredOn=' + envDesiredOn);
+          // Honor the most recent user toggle — they may have turned
+          // env off while the splat was still parsing.
+          if (splatReady) {
+            envGroup.visible = false;
+            if (splatViewer) splatViewer.visible = envDesiredOn;
+            console.log('[env] after hide envGroup: envGroup.visible=' +
+              envGroup.visible + ' splatViewer.visible=' + splatViewer.visible);
+          }
+        }).catch((err) => {
+          console.error('[env] ensureSplatLoaded .then() rejected: ' +
+            (err && err.message ? err.message : err));
+        });
+      } else {
+        renderer.setClearColor(0x000000, 0);
+        envGroup.visible = false;
+        if (splatViewer) splatViewer.visible = false;
+      }
+    }
+  };
+
+  setTimeout(() => notify('ready', true), 80);
+})();
+</script>
+</body>
+</html>

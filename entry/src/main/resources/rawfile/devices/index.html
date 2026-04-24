@@ -1,0 +1,938 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>星核 · 控制面板</title>
+<style>
+  /* =====================================================================
+   * Instrument-panel aesthetic — inspired by variant.com's "sci-fi
+   * terminal + contemplative editorial" families. Dark canvas, phosphor
+   * accents, serif display type for device names, monospaced telemetry
+   * with leading zeros, 1px hairlines, scan-line overlay, numeric tick
+   * scales. No rounded iOS-tile feel — this is a control console.
+   * ===================================================================== */
+  /* Fonts are registered at runtime via the FontFace API from JS
+     (see <script> at bottom). ArkWeb's @font-face doesn't reliably
+     load fonts from rawfile / resource:// paths, so the only
+     dependable path is: read the TTF bytes through the ArkTS
+     `nebula.readRawfileBase64` bridge, decode to ArrayBuffer, hand to
+     new FontFace(), document.fonts.add. This renders from the same
+     TTF that ArkTS registers in Splash.ets — so the statusbar's
+     "LINK STABLE" is pixel-identical whether drawn on Devices (here)
+     or Profile/Discover/Academy (ArkTS). */
+
+  :root {
+    --bg: #0b0b0e;
+    --bg-2: #101013;
+    --surface: #131317;
+    --ink: #ecebe6;
+    --dim: #6d6d76;
+    --muted: #9a9aa3;
+    --line: #212126;
+    --line-2: #2a2a30;
+    --brand: #ff4d33;      /* satellite — red-orange */
+    --mint:  #34d399;      /* cloud — matches ArkTS NebulaColor.accentMint
+                              so the statusbar live dot / chip tints render
+                              identically whether drawn here or on
+                              Academy/Discover/Profile pages. */
+    --amber: #f5b64c;      /* terrarium — signal amber */
+    --sky:   #6ec5ff;
+    /* Sans/mono pin to HarmonyOS Sans (always-present system font) so
+       this WebView renders letter-for-letter the same as the ArkTS
+       pages, whose mono/sans tokens also resolve to HarmonyOS Sans
+       (see theme/Theme.ets). Serif keeps Instrument Serif for page
+       titles and wordmark — it's loaded at runtime via FontFace +
+       the `nebula` bridge (see the loadFonts() IIFE below). */
+    --display: 'HarmonyOS Sans', sans-serif;
+    --mono: 'HarmonyOS Sans', sans-serif;
+    --sans: 'HarmonyOS Sans', sans-serif;
+    --serif: 'Instrument Serif', serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; min-height: 100%; background: var(--bg);
+    -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body {
+    color: var(--ink); font-family: var(--sans);
+    font-feature-settings: 'tnum' 1, 'ss01' 1;
+    -webkit-font-smoothing: antialiased;
+    padding: 0 0 160px 0;
+    overflow-x: hidden;
+    background-image:
+      /* very faint grid */
+      linear-gradient(to right, #ffffff04 1px, transparent 1px),
+      linear-gradient(to bottom, #ffffff04 1px, transparent 1px);
+    background-size: 48px 48px, 48px 48px;
+  }
+  /* scan-line overlay on top of everything */
+  body::after {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 99;
+    background: repeating-linear-gradient(to bottom,
+      transparent 0px, transparent 2px, #ffffff03 2px, #ffffff03 3px);
+    mix-blend-mode: overlay;
+  }
+
+  /* ================= STATUS BAR ================= */
+  /* Match Profile.ets's statusBar precisely so swapping tabs doesn't
+     cause a jump. Profile uses: top padding 52vp, bottom 14, mono 10px
+     with letter-spacing: 2px, 6×6 dot, 13px italic serif wordmark,
+     gap 8px. Everything here maps 1:1 against those values. */
+  .statusbar {
+    position: sticky; top: 0; z-index: 10;
+    display: grid; grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: max(env(safe-area-inset-top, 52px), 52px) 18px 14px 18px;
+    gap: 8px;
+    background: #0b0b0ecc;
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--dim);
+    line-height: 1.4;
+  }
+  .statusbar .node {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-width: 0; white-space: nowrap;
+  }
+  .statusbar .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--mint);
+    box-shadow: 0 0 8px var(--mint); animation: blink 2.4s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes blink { 0%,60%,100% { opacity: 1; } 80% { opacity: 0.35; } }
+  .statusbar .brand-wm {
+    font-family: var(--display); font-style: normal;
+    font-size: 13px; text-transform: none; letter-spacing: 0;
+    color: var(--ink); font-weight: 400;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  .statusbar .r { justify-content: flex-end; }
+
+  /* ================= HEADER ================= */
+  /* Mirrors the ArkTS pageHero layout used on Academy/Discover/Profile:
+       ┌─ 24vp line ─┐ NN / LABEL  ──────────  (flex line)
+       Serif 40px title
+       10px mono uppercase tracked subtitle
+     No extra stat grid — ArkTS pages don't have one, and moving the
+     3-cell "Online / MCU / Sync" row felt like a foreign add-on. Online
+     count + MCU vendor already communicated via each card's rail + chip. */
+  header {
+    padding: 20px 18px 0 18px;
+    max-width: 760px; margin: 0 auto;
+  }
+  .section-label {
+    font-family: var(--mono);
+    font-size: 10px; font-weight: 500;
+    letter-spacing: 2.2px; text-transform: uppercase;
+    color: var(--dim);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-label::before {
+    content: ''; flex: 0 0 24px; height: 1px; background: var(--line);
+  }
+  .section-label::after {
+    content: ''; flex: 1; height: 1px; background: var(--line);
+  }
+  header h1 {
+    margin: 14px 0 8px;
+    font-family: var(--display);
+    font-size: 40px; font-weight: 400;
+    letter-spacing: -0.8px; line-height: 44px;
+    color: var(--ink);
+  }
+  header .sub {
+    font-size: 10px;
+    font-family: var(--mono);
+    letter-spacing: 1.8px; text-transform: uppercase;
+    color: var(--dim); line-height: 14px;
+  }
+  .header-meta .v {
+    font-family: var(--mono);
+    font-size: 15px; font-weight: 500; color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ================= PANELS ================= */
+  main {
+    display: flex; flex-direction: column; gap: 20px;
+    padding: 0 18px; max-width: 760px; margin: 0 auto;
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0;
+    position: relative; overflow: hidden;
+  }
+  .panel[data-accent="brand"] { --acc: var(--brand); }
+  .panel[data-accent="mint"]  { --acc: var(--mint); }
+  .panel[data-accent="amber"] { --acc: var(--amber); }
+
+  /* top rail: id / title / status */
+  .rail {
+    display: grid; grid-template-columns: auto 1fr auto;
+    align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+    gap: 14px;
+  }
+  .rail .seq {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.18em; color: var(--acc);
+    text-transform: uppercase;
+    padding: 4px 8px;
+    border: 1px solid var(--acc);
+    background: color-mix(in srgb, var(--acc) 10%, transparent);
+    border-radius: 3px;
+  }
+  .rail .title {
+    display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  }
+  .rail .title .name {
+    font-family: var(--display);
+    font-size: 20px; font-weight: 400;
+    color: var(--ink); letter-spacing: -0.01em;
+    line-height: 1.1;
+  }
+  .rail .title .spec {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--dim);
+  }
+  .rail .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--dim);
+    cursor: pointer; user-select: none;
+    padding: 6px 10px; border: 1px solid var(--line-2); border-radius: 3px;
+  }
+  .rail .status::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--dim);
+  }
+  .rail .status.on { color: var(--acc); border-color: color-mix(in srgb, var(--acc) 50%, transparent); }
+  .rail .status.on::before { background: var(--acc); box-shadow: 0 0 10px var(--acc); }
+
+  /* body */
+  .body { padding: 18px 16px 4px; display: flex; flex-direction: column; gap: 18px; }
+
+  /* ---------- hero panels (per device) ---------- */
+  .hero {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 18px; min-height: 180px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+  }
+  /* instrument gridlines */
+  .hero::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(to right, #ffffff06 1px, transparent 1px),
+      linear-gradient(to bottom, #ffffff06 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .hero .corner {
+    position: absolute; width: 14px; height: 14px;
+    border: 1px solid var(--acc); opacity: 0.7;
+  }
+  .hero .corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+  .hero .corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+  .hero .corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+  .hero .corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+
+  /* satellite dial */
+  .dial { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .dial svg.gauge { width: 200px; height: 120px; display: block; }
+  .dial .readout {
+    font-family: var(--mono); display: flex; align-items: baseline; gap: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .dial .readout .big {
+    font-size: 46px; font-weight: 500; color: var(--ink); letter-spacing: -0.02em;
+  }
+  .dial .readout .u {
+    font-size: 11px; letter-spacing: 0.25em; text-transform: uppercase; color: var(--dim);
+  }
+
+  /* cloud waveform */
+  .wave svg { width: 100%; max-width: 320px; height: 120px; display: block; }
+  .wave .lbl {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--dim);
+    display: flex; justify-content: space-between; margin-top: 10px; max-width: 320px;
+  }
+  .wave .v { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  /* terrarium dual readout */
+  .dualr {
+    display: grid; grid-template-columns: 1fr 1px 1fr; gap: 18px;
+    align-items: stretch; width: 100%;
+  }
+  .dualr .sep { background: var(--line); width: 1px; }
+  .dualr .cell { display: flex; flex-direction: column; gap: 6px; }
+  .dualr .cell .k {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .dualr .cell .v {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 38px; font-weight: 500; line-height: 1; letter-spacing: -0.02em;
+    color: var(--ink);
+    display: flex; align-items: baseline; gap: 4px;
+  }
+  .dualr .cell .v .u {
+    font-size: 13px; letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--dim); font-weight: 400;
+  }
+  .dualr .cell .n { font-family: var(--mono); font-size: 10px; color: var(--muted);
+    letter-spacing: 0.05em; }
+  .dualr .cell.hot .v { color: var(--amber); }
+  .dualr .cell.cold .v { color: var(--sky); }
+
+  /* ---------- telemetry strip ---------- */
+  .telemetry {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    margin: 0 -16px;
+  }
+  .telemetry .t {
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+    border-right: 1px solid var(--line);
+  }
+  .telemetry .t:last-child { border-right: none; }
+  .telemetry .t .k {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .telemetry .t .v {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 14px; font-weight: 500; color: var(--ink);
+  }
+
+  /* ---------- control blocks ---------- */
+  .ctrl { display: flex; flex-direction: column; gap: 16px; padding: 6px 0 14px; }
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  .field-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  .field-head .k {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.2em; text-transform: uppercase; color: var(--dim);
+  }
+  .field-head .v {
+    font-family: var(--mono); font-size: 13px; font-weight: 500;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+
+  /* range slider */
+  .range { position: relative; padding: 6px 0 4px; }
+  .range .ticks {
+    display: flex; justify-content: space-between;
+    font-family: var(--mono); font-size: 8px; letter-spacing: 0.1em;
+    color: var(--dim); margin-top: 4px; padding: 0 2px;
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 28px; background: transparent; outline: none;
+    margin: 0; padding: 0;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 2px; border-radius: 0;
+    background: linear-gradient(to right,
+      var(--acc) var(--fill, 0%), var(--line-2) var(--fill, 0%));
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 2px; height: 20px; background: var(--acc);
+    margin-top: -9px; cursor: pointer;
+    box-shadow: 0 0 6px var(--acc);
+  }
+  input[type=range].hue::-webkit-slider-runnable-track {
+    height: 3px;
+    background: linear-gradient(to right,
+      hsl(0,70%,55%), hsl(60,70%,55%), hsl(120,70%,55%),
+      hsl(180,70%,55%), hsl(240,70%,55%), hsl(300,70%,55%), hsl(360,70%,55%));
+  }
+
+  /* segmented — terminal style */
+  .seg {
+    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+    border: 1px solid var(--line-2);
+    border-radius: 3px; overflow: hidden;
+  }
+  .seg button {
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    padding: 10px 8px; border: none; border-left: 1px solid var(--line-2);
+    background: transparent; color: var(--dim);
+    cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .seg button:first-child { border-left: none; }
+  .seg button.active {
+    background: var(--acc); color: #0b0b0e; font-weight: 600;
+  }
+  .seg button.active.brand { background: var(--brand); color: #fff; }
+
+  /* switch — 方形 ON/OFF */
+  .row-switch {
+    display: grid; grid-template-columns: 1fr auto; gap: 14px;
+    padding: 10px 0; border-top: 1px solid var(--line);
+    align-items: center;
+  }
+  .row-switch .info .t {
+    font-family: var(--sans); font-size: 14px; color: var(--ink);
+    font-weight: 500; letter-spacing: -0.005em;
+  }
+  .row-switch .info .h {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    color: var(--dim); margin-top: 3px; text-transform: uppercase;
+  }
+  .sw {
+    display: inline-grid; grid-template-columns: repeat(2, 1fr);
+    border: 1px solid var(--line-2); border-radius: 3px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; cursor: pointer; user-select: none;
+    overflow: hidden;
+  }
+  .sw span { padding: 7px 12px; text-align: center; color: var(--dim); min-width: 44px; }
+  .sw.on span.on-l { background: var(--acc); color: #0b0b0e; font-weight: 600; }
+  .sw.on .off-l { color: var(--dim); }
+  .sw.off span.off-l { background: var(--line-2); color: var(--ink); font-weight: 500; }
+
+  /* firmware foot bar */
+  .foot {
+    display: grid; grid-template-columns: 1fr auto; align-items: center;
+    padding: 10px 16px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .foot .r { color: var(--muted); }
+
+  /* ================= CTA ================= */
+  .cta {
+    margin-top: 6px;
+    border: 1px dashed var(--line-2);
+    border-radius: 4px;
+    padding: 18px 18px;
+    display: grid; grid-template-columns: auto 1fr auto;
+    align-items: center; gap: 14px; cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .cta:active { border-color: var(--mint); }
+  .cta .sigil {
+    width: 38px; height: 38px; border: 1px solid var(--line-2); border-radius: 3px;
+    display: grid; place-items: center; color: var(--mint);
+    font-family: var(--mono); font-size: 18px; font-weight: 300;
+  }
+  .cta .text h3 {
+    margin: 0; font-family: var(--display); font-size: 16px; font-weight: 400;
+    color: var(--ink);
+  }
+  .cta .text p {
+    margin: 3px 0 0; font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+  }
+  .cta .arr { font-family: var(--mono); color: var(--dim); }
+</style>
+</head>
+<body>
+
+<div class="statusbar">
+  <div class="node"><span class="dot"></span><span>LINK STABLE</span></div>
+  <div class="brand-wm">星核 · Nebula Core</div>
+  <div class="node r"><span>DEVICES</span></div>
+</div>
+
+<header>
+  <div class="section-label">04 / DEVICES</div>
+  <h1>周边</h1>
+  <div class="sub">HISILICON · AMBIENT PERIPHERALS · <span id="hm-online">03</span> UNITS ONLINE · <span id="hm-sync">— —</span></div>
+</header>
+
+<main>
+
+  <!-- ================= 01 · LEVITATING SATELLITE ================= -->
+  <section class="panel" data-accent="brand">
+    <div class="rail">
+      <span class="seq">01 · LEV</span>
+      <div class="title">
+        <div class="name">磁悬浮卫星</div>
+        <div class="spec">HI3861 · BLE MESH · LEVITRON-A</div>
+      </div>
+      <span class="status on" id="lev-power">ON</span>
+    </div>
+
+    <div class="body">
+      <div class="hero">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="dial">
+          <svg class="gauge" viewBox="0 0 200 120">
+            <!-- tick marks -->
+            <g stroke="#2a2a30" stroke-width="1">
+              <line x1="15" y1="100" x2="15" y2="94"/>
+              <line x1="41" y1="70"  x2="45" y2="75"/>
+              <line x1="78" y1="48"  x2="80" y2="54"/>
+              <line x1="122" y1="48" x2="120" y2="54"/>
+              <line x1="159" y1="70" x2="155" y2="75"/>
+              <line x1="185" y1="100" x2="185" y2="94"/>
+            </g>
+            <!-- base arc -->
+            <path d="M 15 100 A 85 85 0 0 1 185 100"
+              fill="none" stroke="#2a2a30" stroke-width="2" stroke-linecap="round"/>
+            <!-- active arc -->
+            <path id="lev-arc" d="M 15 100 A 85 85 0 0 1 185 100"
+              fill="none" stroke="#ff4d33" stroke-width="2" stroke-linecap="round"
+              stroke-dasharray="267" stroke-dashoffset="173"
+              style="filter: drop-shadow(0 0 4px #ff4d33);"/>
+            <!-- scale labels -->
+            <g fill="#6d6d76" font-family="JetBrains Mono, monospace" font-size="8" letter-spacing="0.5">
+              <text x="9" y="115" text-anchor="start">0</text>
+              <text x="100" y="40" text-anchor="middle">60</text>
+              <text x="191" y="115" text-anchor="end">120</text>
+            </g>
+          </svg>
+          <div class="readout">
+            <span class="big" id="lev-rpm-big">042</span>
+            <span class="u">RPM</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="telemetry">
+        <div class="t"><div class="k">Battery</div><div class="v" id="lev-bat">86%</div></div>
+        <div class="t"><div class="k">Height</div><div class="v"><span id="lev-h-t">14</span>mm</div></div>
+        <div class="t"><div class="k">Mode</div><div class="v" id="lev-mode-t">ORBIT</div></div>
+        <div class="t"><div class="k">Uptime</div><div class="v">42h</div></div>
+      </div>
+
+      <div class="ctrl">
+        <div class="field">
+          <div class="field-head"><span class="k">Spin Rate</span><span class="v"><span id="lev-rpm">042</span> RPM</span></div>
+          <div class="range">
+            <input type="range" min="0" max="120" value="42" id="lev-rpm-s" />
+            <div class="ticks"><span>000</span><span>030</span><span>060</span><span>090</span><span>120</span></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="k">Orbit Profile</span></div>
+          <div class="seg" id="lev-mode">
+            <button class="active" data-v="orbit">轨道</button>
+            <button data-v="spin">自旋</button>
+            <button data-v="static">静止</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="k">Ring Hue</span><span class="v"><span id="lev-hue">210</span>°</span></div>
+          <div class="range"><input type="range" class="hue" min="0" max="360" value="210" id="lev-hue-s" /></div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="k">Levitation</span><span class="v"><span id="lev-h">14</span> mm</span></div>
+          <div class="range">
+            <input type="range" min="6" max="30" value="14" id="lev-h-s" />
+            <div class="ticks"><span>06</span><span>18</span><span>30</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>FW v1.4.2 · LITEOS · CHECKSUM OK</span>
+      <span class="r">0420.SN.0001</span>
+    </div>
+  </section>
+
+  <!-- ================= 02 · HELIUM CLOUD ================= -->
+  <section class="panel" data-accent="mint">
+    <div class="rail">
+      <span class="seq">02 · CLD</span>
+      <div class="title">
+        <div class="name">漂浮氦气云</div>
+        <div class="spec">HI3861 · BLE · HELIA-S</div>
+      </div>
+      <span class="status on" id="cloud-power">ON</span>
+    </div>
+
+    <div class="body">
+      <div class="hero">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="wave" style="width: 100%;">
+          <svg viewBox="0 0 320 120" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="cwg" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="#7cf5c4" stop-opacity="0.45"/>
+                <stop offset="100%" stop-color="#7cf5c4" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <!-- grid -->
+            <g stroke="#1c1c21" stroke-width="1">
+              <line x1="0" y1="30" x2="320" y2="30"/>
+              <line x1="0" y1="60" x2="320" y2="60"/>
+              <line x1="0" y1="90" x2="320" y2="90"/>
+            </g>
+            <!-- waveform -->
+            <path id="cloud-wave-fill" d=""
+              fill="url(#cwg)"/>
+            <path id="cloud-wave-line" d=""
+              stroke="#7cf5c4" stroke-width="1.5" fill="none"
+              style="filter: drop-shadow(0 0 3px #7cf5c4);"/>
+          </svg>
+          <div class="lbl"><span>BRIGHTNESS</span><span class="v"><span id="cloud-pct">60</span>%</span></div>
+        </div>
+      </div>
+
+      <div class="telemetry">
+        <div class="t"><div class="k">He Reserve</div><div class="v" id="cloud-gas">92%</div></div>
+        <div class="t"><div class="k">Warmth</div><div class="v"><span id="cloud-warm-t">5200</span>K</div></div>
+        <div class="t"><div class="k">Fan</div><div class="v"><span id="cloud-fan-t">35</span>%</div></div>
+        <div class="t"><div class="k">Mode</div><div class="v" id="cloud-mode-t">STEADY</div></div>
+      </div>
+
+      <div class="ctrl">
+        <div class="field">
+          <div class="field-head"><span class="k">Luminance</span><span class="v"><span id="cloud-bri">060</span>%</span></div>
+          <div class="range">
+            <input type="range" min="0" max="100" value="60" id="cloud-bri-s" />
+            <div class="ticks"><span>000</span><span>050</span><span>100</span></div>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-head"><span class="k">Color Temperature</span><span class="v"><span id="cloud-warm">5200</span> K</span></div>
+          <div class="range">
+            <input type="range" min="2700" max="6500" step="100" value="5200" id="cloud-warm-s" />
+            <div class="ticks"><span>2700K</span><span>5000K</span><span>6500K</span></div>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-head"><span class="k">Updraft</span><span class="v"><span id="cloud-fan">035</span>%</span></div>
+          <div class="range"><input type="range" min="0" max="100" value="35" id="cloud-fan-s" /></div>
+        </div>
+        <div class="row-switch">
+          <div class="info">
+            <div class="t">呼吸灯效</div>
+            <div class="h">BREATHE · SLOW PULSE MODULATION</div>
+          </div>
+          <div class="sw off" id="cloud-breath">
+            <span class="on-l">ON</span><span class="off-l">OFF</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot">
+      <span>FW v0.9.7 · LITEOS · CHECKSUM OK</span>
+      <span class="r">0420.SN.0002</span>
+    </div>
+  </section>
+
+  <!-- ================= 03 · TERRARIUM ================= -->
+  <section class="panel" data-accent="amber">
+    <div class="rail">
+      <span class="seq">03 · ECO</span>
+      <div class="title">
+        <div class="name">生态缸</div>
+        <div class="spec">HI3516DV300 · WI-FI · GAIA-1</div>
+      </div>
+      <span class="status on" id="terra-power">ON</span>
+    </div>
+
+    <div class="body">
+      <div class="hero" style="padding: 22px 24px;">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="dualr">
+          <div class="cell hot">
+            <div class="k">Temp</div>
+            <div class="v"><span id="terra-temp">24.5</span><span class="u">°C</span></div>
+            <div class="n">TGT <span id="terra-target">25.0</span> · Δ -0.5</div>
+          </div>
+          <div class="sep"></div>
+          <div class="cell cold">
+            <div class="k">RH</div>
+            <div class="v"><span id="terra-hum">78</span><span class="u">%</span></div>
+            <div class="n" id="terra-mist-note">AUTO MIST · 15 MIN</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="telemetry">
+        <div class="t"><div class="k">Camera</div><div class="v" id="terra-cam-t">LIVE</div></div>
+        <div class="t"><div class="k">Light</div><div class="v" id="terra-light-t">DAY</div></div>
+        <div class="t"><div class="k">Co2</div><div class="v">418ppm</div></div>
+        <div class="t"><div class="k">Mist Q</div><div class="v">12</div></div>
+      </div>
+
+      <div class="ctrl">
+        <div class="field">
+          <div class="field-head"><span class="k">Setpoint</span><span class="v"><span id="terra-tv">25.0</span> °C</span></div>
+          <div class="range">
+            <input type="range" min="18" max="32" step="0.5" value="25" id="terra-target-s" />
+            <div class="ticks"><span>18</span><span>25</span><span>32</span></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><span class="k">Light Cycle</span></div>
+          <div class="seg" id="terra-mode">
+            <button class="active" data-v="day">日间</button>
+            <button data-v="night">夜间</button>
+          </div>
+        </div>
+
+        <div class="row-switch">
+          <div class="info"><div class="t">自动喷雾</div><div class="h">ULTRASONIC · INTERVAL TRIG</div></div>
+          <div class="sw on" id="terra-mist"><span class="on-l">ON</span><span class="off-l">OFF</span></div>
+        </div>
+
+        <div class="field" id="terra-min-row">
+          <div class="field-head"><span class="k">Interval</span><span class="v"><span id="terra-min">15</span> MIN</span></div>
+          <div class="range">
+            <input type="range" min="5" max="60" value="15" id="terra-min-s" />
+            <div class="ticks"><span>05</span><span>30</span><span>60</span></div>
+          </div>
+        </div>
+
+        <div class="row-switch">
+          <div class="info"><div class="t">缸内摄像</div><div class="h">1080P H.265 · REMOTE STREAM</div></div>
+          <div class="sw on" id="terra-cam"><span class="on-l">ON</span><span class="off-l">OFF</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>FW v2.1.0 · LITEOS · CHECKSUM OK</span>
+      <span class="r">0420.SN.0003</span>
+    </div>
+  </section>
+
+  <div class="cta">
+    <div class="sigil">+</div>
+    <div class="text">
+      <h3>Pair New Device</h3>
+      <p>BLE DISCOVERY · QR PAIR · NFC HANDSHAKE</p>
+    </div>
+    <span class="arr">→</span>
+  </div>
+
+</main>
+
+<script>
+  // ---- fonts -----------------------------------------------------------
+  // Load the same TTFs that ArkTS registers in Splash.ets by pulling
+  // raw bytes through the JS bridge (window.nebula.readRawfileBase64)
+  // and handing them to the native FontFace API. Doing this in JS
+  // rather than with @font-face bypasses ArkWeb's inconsistent handling
+  // of rawfile-scheme URLs in CSS url().
+  (function loadFonts() {
+    if (!window.nebula || typeof window.nebula.readRawfileBase64 !== 'function') return;
+    const b64ToBuf = (b64) => {
+      const bin = atob(b64);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    };
+    const register = (family, path, descriptors) => {
+      try {
+        const b64 = window.nebula.readRawfileBase64(path);
+        if (!b64) return Promise.resolve();
+        const face = new FontFace(family, b64ToBuf(b64), descriptors);
+        return face.load().then((loaded) => {
+          document.fonts.add(loaded);
+        }).catch(() => {});
+      } catch (e) { return Promise.resolve(); }
+    };
+    Promise.all([
+      register('Inter',            'fonts/Inter-Variable.ttf',       { weight: '100 900', style: 'normal' }),
+      register('Instrument Serif', 'fonts/InstrumentSerif-Regular.ttf', { weight: '400', style: 'normal' }),
+      register('Instrument Serif', 'fonts/InstrumentSerif-Italic.ttf',  { weight: '400', style: 'italic' }),
+    ]).then(() => {
+      // Force a reflow so any text already laid out with fallback picks up
+      // the newly-registered fonts. Without this, initial render can
+      // stick with HarmonyOS Sans until the user scrolls.
+      document.body.style.opacity = '0.999';
+      requestAnimationFrame(() => { document.body.style.opacity = ''; });
+    });
+  })();
+
+  const state = {
+    lev:   { on: true, rpm: 42, mode: 'orbit', hue: 210, h: 14, bat: 86 },
+    cloud: { on: true, bri: 60, warm: 5200, fan: 35, breath: false, gas: 92 },
+    terra: { on: true, target: 25.0, temp: 24.5, hum: 78, day: true,
+             mist: true, min: 15, cam: true },
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const pad = (n, w=3) => String(Math.round(n)).padStart(w, '0');
+
+  // Tint slider fill via --fill CSS var
+  function tintRange(el) {
+    const min = +el.min, max = +el.max, val = +el.value;
+    el.style.setProperty('--fill', ((val-min)/(max-min)*100) + '%');
+  }
+  document.querySelectorAll('input[type=range]').forEach(tintRange);
+  document.addEventListener('input', e => {
+    if (e.target.matches && e.target.matches('input[type=range]')) tintRange(e.target);
+  });
+
+  // Clock + sync tick
+  function clock() {
+    const d = new Date();
+    const z = (n) => String(n).padStart(2,'0');
+    // Statusbar right cell now shows DEVICES label (matching Profile/
+    // Discover/Academy), so the live clock lives in the header's SYNC
+    // meta cell only — HH:MM:SS with a thin date prefix when space
+    // allows. Keeps the tabular-num readout without cluttering the top.
+    $('hm-sync').textContent = `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
+  }
+  clock(); setInterval(clock, 1000);
+
+  // Power pills
+  function wirePower(id, dev) {
+    $(id).addEventListener('click', () => {
+      state[dev].on = !state[dev].on;
+      const el = $(id);
+      el.classList.toggle('on', state[dev].on);
+      el.textContent = state[dev].on ? 'ON' : 'OFF';
+      renderAll();
+    });
+  }
+  wirePower('lev-power', 'lev');
+  wirePower('cloud-power', 'cloud');
+  wirePower('terra-power', 'terra');
+
+  // Segmented
+  document.querySelectorAll('.seg').forEach(seg => {
+    seg.addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      seg.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const v = b.getAttribute('data-v');
+      if (seg.id === 'lev-mode') state.lev.mode = v;
+      if (seg.id === 'terra-mode') state.terra.day = (v === 'day');
+      renderAll();
+    });
+  });
+
+  // Two-state sw (ON/OFF)
+  function wireSw(id, dev, key) {
+    $(id).addEventListener('click', () => {
+      state[dev][key] = !state[dev][key];
+      const el = $(id);
+      el.classList.toggle('on', state[dev][key]);
+      el.classList.toggle('off', !state[dev][key]);
+      renderAll();
+    });
+  }
+  wireSw('cloud-breath', 'cloud', 'breath');
+  wireSw('terra-mist',   'terra', 'mist');
+  wireSw('terra-cam',    'terra', 'cam');
+
+  // Slider binds
+  function bind(id, dev, key, round) {
+    $(id).addEventListener('input', e => {
+      let v = +e.target.value;
+      if (round === 1) v = Math.round(v);
+      state[dev][key] = v;
+      renderAll();
+    });
+  }
+  bind('lev-rpm-s', 'lev', 'rpm', 1);
+  bind('lev-hue-s', 'lev', 'hue', 1);
+  bind('lev-h-s',   'lev', 'h', 1);
+  bind('cloud-bri-s', 'cloud', 'bri', 1);
+  bind('cloud-warm-s','cloud', 'warm', 1);
+  bind('cloud-fan-s', 'cloud', 'fan', 1);
+  bind('terra-target-s', 'terra', 'target', 0);
+  bind('terra-min-s',    'terra', 'min', 1);
+
+  // ---- render ----
+  function renderAll() {
+    // LEV
+    const L = state.lev;
+    const rpmTxt = pad(L.rpm);
+    $('lev-rpm').textContent = rpmTxt;
+    $('lev-rpm-big').textContent = L.on ? rpmTxt : '000';
+    $('lev-hue').textContent = pad(L.hue);
+    $('lev-h').textContent = pad(L.h, 2);
+    $('lev-h-t').textContent = L.h;
+    $('lev-bat').textContent = L.bat + '%';
+    $('lev-mode-t').textContent = L.mode.toUpperCase();
+    // arc: path length ≈ π·85 ≈ 267
+    const f = L.on ? Math.max(0.02, L.rpm / 120) : 0;
+    $('lev-arc').setAttribute('stroke-dashoffset', 267 * (1 - f));
+    $('lev-arc').style.stroke = L.on ? '#ff4d33' : '#2a2a30';
+    $('lev-arc').style.filter = L.on ? 'drop-shadow(0 0 4px #ff4d33)' : 'none';
+
+    // CLOUD
+    const C = state.cloud;
+    $('cloud-bri').textContent = pad(C.bri);
+    $('cloud-pct').textContent = C.on ? pad(C.bri) : '000';
+    $('cloud-warm').textContent = C.warm;
+    $('cloud-warm-t').textContent = C.warm;
+    $('cloud-fan').textContent = pad(C.fan);
+    $('cloud-fan-t').textContent = C.fan;
+    $('cloud-gas').textContent = C.gas + '%';
+    $('cloud-mode-t').textContent = C.breath ? 'BREATHE' : 'STEADY';
+    // Waveform: sine wave, amplitude = brightness, density = fan speed
+    const amp = C.on ? (4 + C.bri * 0.35) : 2;
+    const freq = 0.04 + C.fan * 0.0012;
+    const breath = C.breath ? (Math.sin(Date.now() * 0.002) * 0.2 + 1) : 1;
+    const pts = [];
+    for (let x = 0; x <= 320; x += 4) {
+      const y = 60 - Math.sin(x * freq + Date.now() * 0.001) * amp * breath;
+      pts.push([x, y]);
+    }
+    const line = pts.map((p,i) => (i===0?'M':'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+    const fill = line + ' L 320 120 L 0 120 Z';
+    $('cloud-wave-line').setAttribute('d', line);
+    $('cloud-wave-fill').setAttribute('d', fill);
+    $('cloud-wave-line').style.stroke = C.on ? '#7cf5c4' : '#2a2a30';
+    $('cloud-wave-line').style.filter = C.on ? 'drop-shadow(0 0 3px #7cf5c4)' : 'none';
+
+    // TERRA
+    const T = state.terra;
+    $('terra-temp').textContent = T.temp.toFixed(1);
+    $('terra-target').textContent = T.target.toFixed(1);
+    $('terra-tv').textContent = T.target.toFixed(1);
+    $('terra-hum').textContent = T.hum;
+    $('terra-min').textContent = pad(T.min, 2);
+    $('terra-mist-note').textContent = T.mist ? `AUTO MIST · ${T.min} MIN` : 'MIST OFF';
+    $('terra-min-row').style.display = T.mist ? '' : 'none';
+    $('terra-cam-t').textContent = T.cam ? 'LIVE' : 'OFF';
+    $('terra-light-t').textContent = T.day ? 'DAY' : 'NIGHT';
+
+    // online count
+    const n = (L.on?1:0) + (C.on?1:0) + (T.on?1:0);
+    $('hm-online').textContent = String(n).padStart(2,'0') + ' / 03';
+  }
+
+  // Redraw cloud waveform continuously for subtle animation
+  setInterval(() => {
+    if (state.cloud.on) renderAll();
+  }, 80);
+
+  renderAll();
+
+  // Bridge stub for future Peripherals service integration
+  window.DevicesBridge = {
+    getState: () => JSON.parse(JSON.stringify(state)),
+    setState: (patch) => {
+      Object.assign(state.lev, patch.lev || {});
+      Object.assign(state.cloud, patch.cloud || {});
+      Object.assign(state.terra, patch.terra || {});
+      renderAll();
+    },
+  };
+</script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>Nebula Core</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    overflow: hidden;
+    background: #020510;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    color: #fff;
+  }
+  /* Solid near-black backdrop — kills any blue flash before the
+     launch video fades in. No animated gradient: the video is the
+     visual. */
+  #backdrop {
+    position: fixed; inset: 0; z-index: 0;
+    background: #02040F;
+  }
+  /* Real rocket launch footage (NASA MMS mission) full-bleed. We fade it
+     in once the video is ready so the swap from gradient to launch flame
+     feels designed instead of a pop. */
+  #launch {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    object-fit: cover;
+    object-position: center 42%;
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
+    /* Slight editorial colour grade — deepen contrast, cool the shadows */
+    filter: contrast(1.08) saturate(1.12) brightness(0.98);
+    pointer-events: none;
+  }
+  #launch.ready { opacity: 1; }
+  /* Deep vignette ring to pull the eye to centre and sit the type on dark */
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background:
+      radial-gradient(ellipse 95% 78% at 50% 48%,
+        rgba(0,0,0,0) 55%, rgba(2,5,16,0.45) 85%, rgba(2,5,16,0.85) 100%);
+  }
+  /* Cool-blue tint + top-down vertical gradient that anchors the status
+     bar and the bottom progress bar over dark type-safe zones. */
+  #tint {
+    position: fixed; inset: 0; pointer-events: none; z-index: 3;
+    background:
+      linear-gradient(180deg,
+        rgba(4,8,24,0.75) 0%,
+        rgba(4,8,24,0.0)  18%,
+        rgba(4,8,24,0.0)  72%,
+        rgba(4,8,24,0.85) 100%),
+      linear-gradient(180deg,
+        rgba(20,40,95,0.18) 0%,
+        rgba(20,40,95,0.0)  50%,
+        rgba(20,40,95,0.18) 100%);
+  }
+  #dbg {
+    position: fixed; left: 16px; bottom: 120px;
+    max-width: 70%;
+    font: 11px/1.4 ui-monospace, Menlo, monospace;
+    color: #8aa2d8;
+    opacity: 0;
+    z-index: 9;
+    white-space: pre-wrap;
+    pointer-events: none;
+  }
+  #dbg.show { opacity: 0.8; }
+</style>
+</head>
+<body>
+
+<div id="backdrop"></div>
+
+<video
+  id="launch"
+  autoplay muted loop playsinline
+  preload="auto"
+  disablepictureinpicture
+  disableremoteplayback
+>
+  <!-- Local clip: NASA MMS satellite boom-deployment in orbit,
+       pre-trimmed to the 10-second deployment sequence at 720p.
+       Public domain, 3.0MB. -->
+  <source src="./media/launch.mp4" type="video/mp4" />
+  <!-- CDN fallback in case resource:// video playback is rejected. -->
+  <source src="https://images-assets.nasa.gov/video/GSFC_20141121_MMS_m11702_launch/GSFC_20141121_MMS_m11702_launch~medium.mp4" type="video/mp4" />
+</video>
+
+<div id="vignette"></div>
+<div id="tint"></div>
+<div id="dbg"></div>
+
+<script>
+(function () {
+  const dbg = document.getElementById('dbg');
+  function log(msg) {
+    try { console.log('[splash] ' + msg); } catch (_) {}
+    if (dbg) dbg.textContent += msg + '\n';
+  }
+  function fail(msg) {
+    try { console.error('[splash] ' + msg); } catch (_) {}
+    if (dbg) { dbg.classList.add('show'); dbg.textContent += '⚠ ' + msg + '\n'; }
+  }
+  window.addEventListener('error', e =>
+    fail(e.message + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?')));
+
+  const video = document.getElementById('launch');
+
+  video.addEventListener('loadedmetadata', () => {
+    log('meta ' + video.videoWidth + 'x' + video.videoHeight +
+        ' dur=' + video.duration.toFixed(1) + 's');
+    // Video is pre-trimmed (10s) to the MMS satellite boom-deployment
+    // sequence at 1280x720, so no seek needed.
+  });
+
+  video.addEventListener('loadeddata', () => {
+    log('loadeddata');
+    video.classList.add('ready');
+  });
+  video.addEventListener('canplay', () => log('canplay'));
+  video.addEventListener('playing', () => log('playing'));
+  video.addEventListener('stalled', () => log('stalled'));
+  video.addEventListener('waiting', () => log('waiting'));
+  video.addEventListener('error', () =>
+    fail('video error code=' + (video.error ? video.error.code : '?')));
+
+  // Some WebView versions require an explicit play() even with autoplay.
+  video.play()
+    .then(() => log('play() ok'))
+    .catch(e => fail('play() rejected: ' + e.message));
+
+})();
+</script>
+</body>
+</html>

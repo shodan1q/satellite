@@ -1,0 +1,40 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Nebula Core · 多端 3D 火箭工坊 + 爆炸图科普"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Nebula Core main entry"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Nebula Core"
+    },
+    {
+      "name": "reason_distributed_datasync",
+      "value": "用于在手机、平板、手表之间同步当前火箭设计与控制状态"
+    },
+    {
+      "name": "reason_internet",
+      "value": "预留给未来的轨道数据刷新能力"
+    },
+    {
+      "name": "reason_camera",
+      "value": "用于在真实空间中放置与组装虚拟火箭 / 卫星"
+    },
+    {
+      "name": "reason_wifi",
+      "value": "在设备页显示当前 Wi-Fi 连接状态"
+    },
+    {
+      "name": "reason_accelerometer",
+      "value": "用于识别挥动 / 晃动手势以操作 AR 火箭"
+    },
+    {
+      "name": "reason_gyroscope",
+      "value": "用于识别挥动 / 晃动手势以操作 AR 火箭"
+    }
+  ]
+}

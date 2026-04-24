@@ -11,6 +11,12 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "ohos.net.network_security_config",
+        "resource": "$profile:network_config"
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",
@@ -72,6 +78,10 @@
       },
       {
         "name": "ohos.permission.GET_WIFI_INFO",
+        "reason": "$string:reason_wifi"
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO",
         "reason": "$string:reason_wifi"
       },
       {

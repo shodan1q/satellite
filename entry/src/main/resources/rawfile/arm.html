@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>Nebula · Arm Tracking</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    overflow: hidden;
+    background: #0a0a0c;
+    color: #fafafa;
+    font-family: Inter, system-ui, sans-serif;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+  }
+  #cam, #overlay {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    object-fit: cover;
+    pointer-events: none;
+  }
+  #cam { z-index: 1; transform: scaleX(-1); }
+  #overlay { z-index: 2; }
+  #status {
+    position: fixed;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    background: rgba(24,24,27,0.85);
+    border: 1px solid rgba(39,39,42,0.9);
+    border-radius: 999px;
+    color: #fafafa;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    z-index: 10;
+  }
+  #hud {
+    position: fixed;
+    left: 12px; top: 56px;
+    background: rgba(11,11,14,0.62);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(140,170,220,0.22);
+    color: #E6EDF7;
+    font-family: "JetBrains Mono","SF Mono",ui-monospace,monospace;
+    font-size: 11px; letter-spacing: 0.4px; line-height: 1.55;
+    padding: 8px 10px;
+    border-radius: 8px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  #hud .title { color: #8AB4FF; font-weight: 600; letter-spacing: 1.4px; font-size: 10px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hud .row span:first-child { color: #8FA3BF; }
+  #hud .row span:last-child  { color: #E6EDF7; font-variant-numeric: tabular-nums; }
+  #err {
+    position: fixed;
+    left: 16px; right: 16px; bottom: 16px;
+    padding: 10px 14px;
+    background: rgba(200,40,40,0.85);
+    border-radius: 12px;
+    font-size: 12px;
+    color: #fff;
+    z-index: 12;
+    display: none;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<video id="cam" autoplay muted playsinline></video>
+<canvas id="overlay"></canvas>
+<div id="status">ARM TRACKING · STARTING…</div>
+<div id="hud">
+  <div class="title">ARM ANGLES</div>
+  <div class="row"><span>L ELBOW</span><span id="hL">  --°</span></div>
+  <div class="row"><span>R ELBOW</span><span id="hR">  --°</span></div>
+  <div class="row"><span>POSE</span><span id="hP">idle</span></div>
+</div>
+<div id="err"></div>
+<script>
+(function () {
+  const statusEl = document.getElementById('status');
+  const errEl = document.getElementById('err');
+  const hL = document.getElementById('hL');
+  const hR = document.getElementById('hR');
+  const hP = document.getElementById('hP');
+  function setStatus(s) { statusEl.textContent = s; }
+  function fail(msg) {
+    errEl.style.display = 'block';
+    errEl.textContent = msg;
+    try { console.error('[arm] ' + msg); } catch (_) {}
+    bridgePush(0, 0, 0, false);
+  }
+  window.addEventListener('error', e => fail('err: ' + e.message));
+  window.addEventListener('unhandledrejection', e => fail('rej: ' + String(e.reason)));
+
+  /* Bridge to ArkTS — Workshop.ets registers window.armBridge with:
+       onArms(sides, leftAngle, rightAngle, stable)
+       onArmPose(kind)
+  */
+  let bridgeTick = 0, bridgeFails = 0;
+  function bridgePush(sides, leftAngle, rightAngle, stable) {
+    bridgeTick++;
+    if (bridgeTick % 30 === 1) {
+      try {
+        console.log('[arm] t#' + bridgeTick
+          + ' bridge=' + (window.armBridge ? 'OK' : 'MISSING')
+          + ' sides=' + sides
+          + ' L=' + (leftAngle || 0).toFixed(2)
+          + ' R=' + (rightAngle || 0).toFixed(2)
+          + ' fails=' + bridgeFails);
+      } catch (_) {}
+    }
+    try {
+      if (window.armBridge && typeof window.armBridge.onArms === 'function') {
+        window.armBridge.onArms(sides | 0, +leftAngle || 0, +rightAngle || 0, !!stable);
+      } else {
+        bridgeFails++;
+      }
+    } catch (e) {
+      bridgeFails++;
+      try { console.error('[arm] bridge threw: ' + e.message); } catch (_) {}
+    }
+  }
+  let lastPose = 'idle';
+  function bridgePose(kind) {
+    if (kind === lastPose) return;
+    lastPose = kind;
+    try {
+      if (window.armBridge && typeof window.armBridge.onArmPose === 'function') {
+        window.armBridge.onArmPose(String(kind));
+      }
+    } catch (_) {}
+  }
+
+  /* ---------- robot bridge (native) ----------
+     The WebSocket itself lives in ArkTS (see services/RobotClient.ets)
+     because ArkWeb blocks cleartext ws:// even when the module-level
+     network_security_config permits it. All outbound commands go
+     through the armBridge proxy; status comes back via armBridge.
+     Helpers preserved as `robot.send`/`robot.stop` so the rest of the
+     page's code didn't need to change. */
+  const robot = {
+    send(obj) {
+      if (!window.armBridge || typeof window.armBridge.onRobotCmd !== 'function') {
+        return false;
+      }
+      try {
+        window.armBridge.onRobotCmd(JSON.stringify(obj));
+        return true;
+      } catch (_) { return false; }
+    },
+    stop() { this.send({ cmd: 'phone_stop' }); }
+  };
+
+  // ArkTS-side API shims. Workshop.ets's joystick handlers call these
+  // via runJavaScript — same surface as before, but now they just
+  // bounce the command to the native bridge.
+  window.armRobotEstop = function (hard) { robot.send({ cmd: 'estop', hard: !!hard }); };
+  window.armRobotRot = function (droll, dpitch, dyaw) {
+    robot.send({
+      cmd: 'phone_rot',
+      droll: +droll || 0,
+      dpitch: +dpitch || 0,
+      dyaw: +dyaw || 0
+    });
+  };
+  // URL editing moved to ArkTS entirely — see Workshop.ets's long-press
+  // dialog. These are kept only as noops so any leftover calls don't
+  // throw ReferenceError during the transition.
+  window.setRobotWsUrl = function () { return false; };
+  window.getRobotWsUrl = function () { return ''; };
+
+  /* Vector helpers on { x, y } landmarks. MediaPipe returns normalised
+     coords in [0..1] from the TOP-LEFT — we keep them in that space
+     for angle math and only flip to canvas space in drawOverlay.       */
+  function v(a, b) { return { x: b.x - a.x, y: b.y - a.y }; }
+  function mag(d)  { return Math.sqrt(d.x*d.x + d.y*d.y); }
+  function angleAt(a, b, c) {
+    // Interior angle at joint b formed by rays b->a and b->c. Returns
+    // radians in [0, π]. Used for elbow flexion (a=shoulder, b=elbow, c=wrist).
+    const ab = v(b, a), cb = v(b, c);
+    const d = mag(ab) * mag(cb);
+    if (d < 1e-6) return 0;
+    let cos = (ab.x*cb.x + ab.y*cb.y) / d;
+    cos = Math.max(-1, Math.min(1, cos));
+    return Math.acos(cos);
+  }
+
+  /* MediaPipe Pose landmark indices (BlazePose 33-point topology):
+       11 left shoulder   12 right shoulder
+       13 left elbow      14 right elbow
+       15 left wrist      16 right wrist
+       23 left hip        24 right hip
+     We use 11-16 for the arm skeleton overlay, plus 23/24 for a hint
+     at the torso anchor so the user knows to be upright in frame.     */
+  const ARM_POINTS = [11, 12, 13, 14, 15, 16, 23, 24];
+  const ARM_BONES = [
+    [11, 13], [13, 15],   // left arm
+    [12, 14], [14, 16],   // right arm
+    [11, 12],             // shoulders
+    [11, 23], [12, 24],   // torso sides
+    [23, 24]              // hip line
+  ];
+
+  /* Classify the high-level pose from wrist/shoulder/elbow positions.
+     Rough rules — tuned for a single upright user facing the camera.
+       tpose       arms out roughly horizontal, both straight
+       raised-*    one/both wrists above shoulders
+       cross       wrists crossed in front of chest
+       idle        default
+
+     COORDINATE NOTE: MediaPipe returns raw camera-frame coords (the CSS
+     mirror on the <video> element is purely visual). With a front
+     camera, the user's LEFT shoulder (landmark 11) appears on the RIGHT
+     half of the image, so ls.x > rs.x. Every "lateral extension" check
+     below is written in *image* space, not user space.                */
+  function classify(L) {
+    const ls = L[11], rs = L[12], le = L[13], re = L[14], lw = L[15], rw = L[16];
+    if (!ls || !rs || !lw || !rw) return 'idle';
+    // Loose visibility gate — lite model often reports 0.3–0.5 for
+    // clearly visible wrists. Anything below 0.25 we treat as absent.
+    const vis = (p) => (p && p.visibility !== undefined ? p.visibility : 1);
+    if (Math.min(vis(ls), vis(rs)) < 0.25) return 'idle';
+    const lwOk = vis(lw) > 0.2;
+    const rwOk = vis(rw) > 0.2;
+    if (!lwOk && !rwOk) return 'idle';
+
+    // y goes DOWN in image coords, so "above shoulder" = smaller y.
+    const leftRaised  = lwOk && lw.y < ls.y - 0.05;
+    const rightRaised = rwOk && rw.y < rs.y - 0.05;
+
+    const shoulderSpan = Math.max(0.05, Math.abs(ls.x - rs.x));
+    // User's left arm extends to IMAGE right  (lw.x > ls.x).
+    // User's right arm extends to IMAGE left  (rw.x < rs.x).
+    const leftOut  = lwOk && (lw.x - ls.x) / shoulderSpan > 0.9;
+    const rightOut = rwOk && (rs.x - rw.x) / shoulderSpan > 0.9;
+    const leftLevel  = lwOk && Math.abs(lw.y - ls.y) < 0.09;
+    const rightLevel = rwOk && Math.abs(rw.y - rs.y) < 0.09;
+
+    // Arms crossed — wrist past body midline to the wrong side.
+    const mid = (ls.x + rs.x) / 2;
+    const leftCrossed  = lwOk && lw.x < mid - 0.03;   // user's left wrist on image LEFT
+    const rightCrossed = rwOk && rw.x > mid + 0.03;   // user's right wrist on image RIGHT
+
+    if (leftRaised && rightRaised) return 'raised-both';
+    if (leftOut && rightOut && leftLevel && rightLevel) return 'tpose';
+    if (leftCrossed && rightCrossed) return 'cross';
+    if (leftRaised)  return 'raised-left';
+    if (rightRaised) return 'raised-right';
+    return 'idle';
+  }
+
+  /* ---------- MediaPipe Pose loader ---------- */
+  const CDN_ROOTS = [
+    'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+    'https://unpkg.com/@mediapipe/pose@0.5.1675469404/'
+  ];
+  function loadScript(url) {
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.crossOrigin = 'anonymous';
+      s.onload = res;
+      s.onerror = () => rej(new Error('script fail: ' + url));
+      document.head.appendChild(s);
+    });
+  }
+  async function ensurePose() {
+    if (window.Pose) return CDN_ROOTS[0];
+    for (const root of CDN_ROOTS) {
+      try {
+        await loadScript(root + 'pose.js');
+        if (window.Pose) return root;
+      } catch (e) { console.warn(e.message); }
+    }
+    throw new Error('MediaPipe Pose library unreachable on every CDN');
+  }
+
+  /* ---------- front-camera acquisition (same retry ladder as hand.html) ---------- */
+  let activeStream = null;
+  async function startCameraOnce(mode) {
+    const video = document.getElementById('cam');
+    let constraints;
+    if (mode === 'front-640') constraints = { video: { facingMode: 'user', width: 640, height: 480 }, audio: false };
+    else if (mode === 'front-any') constraints = { video: { facingMode: 'user' }, audio: false };
+    else if (mode === 'any-640')   constraints = { video: { width: 640, height: 480 }, audio: false };
+    else                           constraints = { video: true, audio: false };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (activeStream) {
+      try { for (const t of activeStream.getTracks()) t.stop(); } catch (_) {}
+    }
+    activeStream = stream;
+    video.srcObject = stream;
+    await Promise.race([
+      new Promise(res => { video.onloadedmetadata = res; }),
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error('video metadata timeout')), 4000))
+    ]);
+    await video.play();
+    return video;
+  }
+  async function startCamera() {
+    const plan = [
+      { delayMs:    0, mode: 'front-640' },
+      { delayMs:  400, mode: 'front-any' },
+      { delayMs:  900, mode: 'any-640'   },
+      { delayMs: 1800, mode: 'any'       }
+    ];
+    let lastErr = null;
+    for (let i = 0; i < plan.length; i++) {
+      const step = plan[i];
+      if (step.delayMs > 0) {
+        setStatus('CAMERA RETRY ' + (i + 1) + '/' + plan.length + ' (' + step.mode + ')…');
+        await new Promise(r => setTimeout(r, step.delayMs));
+      }
+      try {
+        return await startCameraOnce(step.mode);
+      } catch (e) {
+        lastErr = e;
+        try { console.warn('[arm] camera attempt ' + (i + 1) + ' (' + step.mode + ') failed: ' + (e && e.message ? e.message : String(e))); } catch (_) {}
+        try {
+          if (activeStream) { for (const t of activeStream.getTracks()) t.stop(); activeStream = null; }
+        } catch (_) {}
+      }
+    }
+    throw lastErr || new Error('camera unreachable after 4 attempts');
+  }
+  function releaseCamera() {
+    try {
+      if (activeStream) {
+        for (const t of activeStream.getTracks()) t.stop();
+        activeStream = null;
+      }
+      const v = document.getElementById('cam');
+      if (v) v.srcObject = null;
+      try { console.log('[arm] releaseCamera done'); } catch (_) {}
+    } catch (_) {}
+  }
+  window.releaseCamera = releaseCamera;
+  function onPageLeave() {
+    // Tell the robot to stop BEFORE tearing down the camera — otherwise
+    // the last frame we sent stays as the target until the 0.5s
+    // watchdog trips, and the arm may keep creeping.
+    try { robot.stop(); } catch (_) {}
+    releaseCamera();
+  }
+  window.addEventListener('pagehide', onPageLeave);
+  window.addEventListener('beforeunload', onPageLeave);
+
+  /* ---------- overlay canvas ---------- */
+  function resizeOverlay() {
+    const c = document.getElementById('overlay');
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    c.width = Math.round(window.innerWidth * dpr);
+    c.height = Math.round(window.innerHeight * dpr);
+    const ctx = c.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    c.__logicalW = window.innerWidth;
+    c.__logicalH = window.innerHeight;
+  }
+  window.addEventListener('resize', resizeOverlay);
+  resizeOverlay();
+
+  function drawOverlay(lms) {
+    const c = document.getElementById('overlay');
+    const ctx = c.getContext('2d');
+    const W = c.__logicalW || c.width;
+    const H = c.__logicalH || c.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!lms) return;
+
+    const JOINT_R = 8;
+    const JOINT_RING = 2.5;
+    const BONE_W = 4;
+
+    // Bones — white halo under an accent-colored line. Cyan reads well
+    // against the warm camera-feed colors of skin/clothing (hand.html
+    // uses brand orange for hands; we pick cyan to keep the two modes
+    // visually distinct when the user toggles between them).
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = BONE_W + 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (const pair of ARM_BONES) {
+      const a = lms[pair[0]], b = lms[pair[1]];
+      if (!a || !b) continue;
+      const ax = (1 - a.x) * W, ay = a.y * H;
+      const bx = (1 - b.x) * W, by = b.y * H;
+      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#22D3EE';   // cyan accent
+    ctx.lineWidth = BONE_W;
+    ctx.beginPath();
+    for (const pair of ARM_BONES) {
+      const a = lms[pair[0]], b = lms[pair[1]];
+      if (!a || !b) continue;
+      const ax = (1 - a.x) * W, ay = a.y * H;
+      const bx = (1 - b.x) * W, by = b.y * H;
+      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    }
+    ctx.stroke();
+
+    // Joints.
+    for (const idx of ARM_POINTS) {
+      const p = lms[idx];
+      if (!p) continue;
+      const x = (1 - p.x) * W;
+      const y = p.y * H;
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath();
+      ctx.arc(x, y, JOINT_R + JOINT_RING, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#22D3EE';
+      ctx.beginPath();
+      ctx.arc(x, y, JOINT_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Wrist halos — highlight the two "end-effector" points, matching
+    // how hand.html calls out the palm centre.
+    const wrists = [15, 16];
+    for (const i of wrists) {
+      const p = lms[i];
+      if (!p) continue;
+      const x = (1 - p.x) * W;
+      const y = p.y * H;
+      ctx.strokeStyle = '#FFB347';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(x, y, JOINT_R + 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /* ---------- per-frame results ---------- */
+  function onResults(results) {
+    const lms = results.poseLandmarks;
+    // poseWorldLandmarks: metric 3D, origin at hip mid. Used to drive
+    // the robot arm. 2D landmarks (lms) still used for overlay drawing
+    // since they're in image space.
+    const wlms = results.poseWorldLandmarks;
+    drawOverlay(lms);
+    if (!lms) {
+      bridgePush(0, 0, 0, false);
+      bridgePose('idle');
+      setStatus('SHOW UPPER BODY TO CAMERA');
+      hL.textContent = '  --°';
+      hR.textContent = '  --°';
+      hP.textContent = 'idle';
+      // Stay silent — DON'T send phone_stop. The robot's 0.5s watchdog
+      // will freeze motion on its own. Sending stop here used to race
+      // with the joystick: the first dropout frame disabled the server,
+      // and subsequent phone_rot commands from the sticks were silently
+      // ignored. Silence is also what keeps joystick-only users alive
+      // when they never face the camera.
+      return;
+    }
+
+    const ls = lms[11], rs = lms[12];
+    const le = lms[13], re = lms[14];
+    const lw = lms[15], rw = lms[16];
+    // Existence-only gate: Pose always returns a full 33-landmark array
+    // whenever poseLandmarks is populated, so the landmarks are "there"
+    // — visibility only reflects how confident the model is. Gating on
+    // visibility > 0.2 was still dropping frames on this device, which
+    // starved the robot watchdog. Trust presence and let the robot-side
+    // jump detector (20cm/frame) filter actual garbage.
+    const present = (p) => p !== undefined && p !== null;
+    const leftOk  = present(ls) && present(le) && present(lw);
+    const rightOk = present(rs) && present(re) && present(rw);
+    const leftAngle  = leftOk  ? angleAt(ls, le, lw) : 0;
+    const rightAngle = rightOk ? angleAt(rs, re, rw) : 0;
+    const sides = (leftOk ? 1 : 0) + (rightOk ? 1 : 0);
+    bridgePush(sides, leftAngle, rightAngle, sides > 0);
+
+    const kind = classify(lms);
+    bridgePose(kind);
+
+    hL.textContent = leftOk  ? fmtDeg(leftAngle)  : '  --°';
+    hR.textContent = rightOk ? fmtDeg(rightAngle) : '  --°';
+    hP.textContent = kind;
+    setStatus(
+      sides === 0 ? 'SHOW UPPER BODY TO CAMERA'
+      : sides === 1 ? 'ONE ARM · ' + kind.toUpperCase()
+      :              'BOTH ARMS · ' + kind.toUpperCase()
+    );
+
+    // Push the RIGHT arm (shoulder 12 + wrist 16) to the robot. Prefer
+    // poseWorldLandmarks (meters, hip-centered) for a metric offset —
+    // body-anchored and distance-invariant. Fall back to normalized 2D
+    // image coords × a fixed gain if world landmarks are unavailable;
+    // Pose sometimes omits them on low-complexity models or noisy frames.
+    if (rightOk) {
+      let sx = 0, sy = 0, sz = 0, wx_ = 0, wy_ = 0, wz_ = 0;
+      let usedWorld = false;
+      if (wlms && wlms[12] && wlms[16]) {
+        const wsh = wlms[12], wwr = wlms[16];
+        sx = wsh.x; sy = wsh.y; sz = wsh.z;
+        wx_ = wwr.x; wy_ = wwr.y; wz_ = wwr.z;
+        usedWorld = true;
+      } else {
+        // 2D fallback. lms coords are normalized to image [0..1]; a
+        // fully extended arm spans roughly 0.25–0.35 of image width.
+        // Scale ~2 m/unit so a 0.3-unit extension reads as ~0.6 m on
+        // the robot side — close enough for position control.
+        const SCALE = 2.0;
+        sx = rs.x * SCALE; sy = rs.y * SCALE; sz = 0;
+        wx_ = rw.x * SCALE; wy_ = rw.y * SCALE; wz_ = 0;
+      }
+      if (!window.__armFrameLogged) {
+        try {
+          console.log('[arm] first phone_frame — using '
+            + (usedWorld ? 'world' : '2D-fallback')
+            + ' coords · s=(' + sx.toFixed(2) + ',' + sy.toFixed(2) + ',' + sz.toFixed(2) + ')'
+            + ' w=(' + wx_.toFixed(2) + ',' + wy_.toFixed(2) + ',' + wz_.toFixed(2) + ')');
+        } catch (_) {}
+        window.__armFrameLogged = true;
+      }
+      robot.send({
+        cmd: 'phone_frame',
+        ts: Date.now(),
+        sx: sx, sy: sy, sz: sz,
+        wx: wx_, wy: wy_, wz: wz_,
+        vis: (rw.visibility !== undefined ? rw.visibility : 1)
+      });
+    }
+    // Right arm not detected this frame — stay silent. The 0.5s
+    // server-side watchdog stops motion anyway, and staying silent
+    // lets joystick-only control keep the session alive (see the
+    // outer `if (!lms)` comment for the race this avoids).
+  }
+  function fmtDeg(rad) {
+    const deg = rad * 180 / Math.PI;
+    const s = deg.toFixed(0);
+    return (deg >= 0 && deg < 100 ? ' ' : '') + s + '°';
+  }
+
+  async function runLoop(pose, video) {
+    let lastT = 0;
+    let sendErrors = 0;
+    async function step() {
+      if (video.readyState >= 2 && performance.now() - lastT > 60) {
+        lastT = performance.now();
+        try {
+          await pose.send({ image: video });
+        } catch (e) {
+          sendErrors++;
+          if (sendErrors === 10) {
+            fail('pose.send repeatedly failing — wasm/model load likely broken: '
+              + (e && e.message ? e.message : String(e)));
+          }
+        }
+      }
+      requestAnimationFrame(step);
+    }
+    step();
+  }
+
+  async function main() {
+    setStatus('LOADING MEDIAPIPE POSE…');
+    const root = await ensurePose();
+    const pose = new window.Pose({ locateFile: (f) => root + f });
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.4,
+      minTrackingConfidence: 0.4
+    });
+    pose.onResults(onResults);
+    setStatus('REQUESTING CAMERA…');
+    const video = await startCamera();
+    setStatus('TRACKING ARMS…');
+    runLoop(pose, video);
+  }
+
+  main().catch(e => {
+    const msg = e && e.message ? e.message : String(e);
+    fail(msg);
+    setStatus('CAMERA BUSY · 回到 AR 再点手臂重试');
+  });
+})();
+</script>
+</body>
+</html>

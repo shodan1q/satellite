@@ -34,6 +34,7 @@ import { GestureEvent, GesturePipeline, GestureTelemetry } from '../services/Ges
 import { HandFrame, HandGestureEvent, HandGesturePipeline, HandGrabEvent } from '../services/HandGesturePipeline';
 import { GestureBurst } from '../components/GestureBurst';
 import { JoystickPad } from '../components/JoystickPad';
+import { RobotClient, RobotState } from '../services/RobotClient';
 
 class PaletteEntry {
   id: string = '';
@@ -73,6 +74,113 @@ class HandJsBridge {
   }
 }
 
+/**
+ * JavaScript proxy object exposed to rawfile/arm.html.
+ *
+ * Arm pose tracking runs MediaPipe Pose (33 body landmarks) and
+ * reports per-frame arm telemetry:
+ *   - onArms(sides, leftAngle, rightAngle, stable)
+ *       sides: 0/1/2 — how many arm sides have a confident wrist landmark
+ *       leftAngle/rightAngle: elbow flexion in radians (0=straight, π=fully folded)
+ *       stable: landmark confidence gate passed this frame
+ *   - onArmPose(kind)
+ *       kind: 'idle' | 'raised-left' | 'raised-right' | 'raised-both'
+ *             | 'tpose' | 'cross'
+ */
+class ArmJsBridge {
+  private beatCount: number = 0;
+  // Bound by WorkshopPage.aboutToAppear — arm.html calls onRobotCmd with
+  // a JSON string, which we parse and route to the native RobotClient.
+  // This is the cleartext-ws:// workaround: ArkWeb's built-in WebSocket
+  // is blocked at the Chromium layer, so we never open a socket there
+  // and instead tunnel every frame through this bridge into ArkTS.
+  private cmdSink: (jsonStr: string) => void =
+    (jsonStr: string): void => {};
+  setRobotCmdSink(fn: (jsonStr: string) => void): void {
+    this.cmdSink = fn;
+  }
+  onArms(sides: number, leftAngle: number, rightAngle: number, stable: boolean): void {
+    this.beatCount++;
+    if (this.beatCount % 30 === 1) {
+      hilog.info(0x1, 'WorkshopArm',
+        'bridge tick #%{public}d sides=%{public}d L=%{public}s R=%{public}s stable=%{public}s',
+        this.beatCount, sides,
+        leftAngle.toFixed(2), rightAngle.toFixed(2), String(stable));
+    }
+  }
+  onArmPose(kind: string): void {
+    hilog.info(0x1, 'WorkshopArm', 'pose=%{public}s', kind);
+  }
+  private cmdCount: number = 0;
+  onRobotCmd(jsonStr: string): void {
+    this.cmdCount++;
+    // Rate-limited log so we can confirm the bridge is flowing from the
+    // WebView side. First call + every 30 thereafter.
+    if (this.cmdCount === 1 || this.cmdCount % 30 === 0) {
+      hilog.info(0x1, 'WorkshopArm',
+        'onRobotCmd #%{public}d (len=%{public}d) %{public}s',
+        this.cmdCount, jsonStr.length,
+        jsonStr.length > 80 ? jsonStr.substring(0, 80) : jsonStr);
+    }
+    this.cmdSink(jsonStr);
+  }
+}
+
+/**
+ * Input dialog for the robot WebSocket URL. ArkTS's AlertDialog can't
+ * host a TextInput, so we roll a CustomDialog. The initial text is
+ * seeded from WorkshopPage's @State draft via the draftRef callback —
+ * CustomDialog construction is deferred, so a direct @State capture
+ * via closure in build() was sometimes stale on first open.
+ */
+@CustomDialog
+struct WsUrlInputDialog {
+  controller?: CustomDialogController;
+  draftRef: () => string = (): string => 'ws://172.20.10.2:8765';
+  setDraft: (v: string) => void = (v: string): void => {};
+  onConfirm: (url: string) => void = (u: string): void => {};
+
+  build() {
+    Column({ space: 14 }) {
+      Text('机器人 WebSocket 地址')
+        .fontSize(16).fontWeight(FontWeight.Bold)
+        .fontColor('#FFFFFF')
+      Text('改完会立即重连 · 保存在本地，重启 app 仍生效')
+        .fontSize(11).fontColor('#A0A0A8')
+      TextInput({ text: this.draftRef(), placeholder: 'ws://172.20.10.2:8765' })
+        .width('100%')
+        .height(44)
+        .backgroundColor('#18181B')
+        .fontColor('#FFFFFF')
+        .placeholderColor('#6B7280')
+        .borderRadius(8)
+        .padding({ left: 12, right: 12 })
+        .onChange((v: string): void => { this.setDraft(v); })
+      Row({ space: 10 }) {
+        Button('取消')
+          .fontColor('#D1D5DB').fontSize(14)
+          .backgroundColor('#27272A')
+          .layoutWeight(1)
+          .onClick((): void => { this.controller?.close(); })
+        Button('重连')
+          .fontColor('#FFFFFF').fontSize(14)
+          .backgroundColor('#E02424')
+          .layoutWeight(1)
+          .onClick((): void => {
+            const u = this.draftRef();
+            this.controller?.close();
+            this.onConfirm(u);
+          })
+      }.width('100%')
+    }
+    .padding(20)
+    .backgroundColor('#0B0B0EF2')
+    .border({ width: 1, color: '#27272A' })
+    .borderRadius(18)
+    .width(320)
+  }
+}
+
 @Component
 export struct WorkshopPage {
   @State private rocketId: string = 'custom-sat';
@@ -94,6 +202,15 @@ export struct WorkshopPage {
   @State private handStage: string = 'mid';
   @State private handCount: number = 0;
   @State private landscape: boolean = false;
+  // "手臂" — camera-driven arm-pose tracking via MediaPipe Pose. Mirror
+  // of hand mode: front camera + landmark overlay of shoulders/elbows/
+  // wrists. Mutually exclusive with 手势 (they share the front camera).
+  @State private armOn: boolean = false;
+  // Robot WebSocket status — mirrored from RobotClient.onStatus so the
+  // topBar can render a visible badge. 'idle' before arm mode is
+  // opened; after opening, cycles through connecting/linked/active/dead.
+  @State private armWsClass: string = 'idle';
+  @State private armWsDetail: string = '';
   // "空间" — procedural maker-lab backdrop. When on, the WebView paints
   // a sci-fi workshop (floor grid + light columns + workbenches + truss)
   // behind the model and the camera passthrough layer below is hidden.
@@ -117,9 +234,14 @@ export struct WorkshopPage {
   private unsubHand: () => void = (): void => {};
   private unsubHandGrab: () => void = (): void => {};
   private handWebController: webview.WebviewController = new webview.WebviewController();
+  private armWebController: webview.WebviewController = new webview.WebviewController();
   // Bridge object exposed to the hand-tracking WebView via javaScriptProxy.
   // `this` capture must be stable between mounts, so we lock it in once.
   private handBridge: HandJsBridge = new HandJsBridge();
+  private armBridge: ArmJsBridge = new ArmJsBridge();
+  // Native WebSocket to teach_monitor.py. Owns its own socket lifecycle;
+  // Workshop calls connect()/disconnect() in sync with armOn.
+  private robotClient: RobotClient = new RobotClient();
   private gestureHintTimer: number = -1;
 
   private bridge: ArBridge = new ArBridge();
@@ -132,6 +254,18 @@ export struct WorkshopPage {
     // AR Workshop runs edge-to-edge with rotation enabled — user can hold
     // the phone however they like to frame the model in the room.
     this.enterImmersive();
+
+    // Route every command from arm.html (JSON string over the JS proxy)
+    // into the native RobotClient, which owns the real WebSocket.
+    this.armBridge.setRobotCmdSink((jsonStr: string): void => {
+      this.forwardRobotCmd(jsonStr);
+    });
+    // RobotClient → ArkTS @State. Drives the colored pill in topBar
+    // plus the red detail pill shown on failure.
+    this.robotClient.onStatus((cls: RobotState, _head: string, detail: string): void => {
+      this.armWsClass = cls;
+      this.armWsDetail = detail;
+    });
 
     const list: Chip[] = [];
     // Put the 自制卫星 starter kit first — it's the Workshop default and
@@ -358,6 +492,8 @@ export struct WorkshopPage {
       this.bridge.setEnvironment(this.envOn && !this.handOn);
       return;
     }
+    // Front camera is singleton — if arm mode is on, release it first.
+    if (this.armOn) this.toggleArm();
     // Announce that the WebView MediaPipe bridge will drive detection.
     // Must be set BEFORE subscribe() so start() doesn't spin up the
     // emulate tick loop.
@@ -381,6 +517,44 @@ export struct WorkshopPage {
     // feed and landmark overlay to be visible underneath. envOn is
     // preserved so turning hand mode OFF restores the backdrop.
     this.bridge.setEnvironment(false);
+  }
+
+  // --------- arm-pose pipeline (camera-based, mirrors hand mode) ---------
+
+  private toggleArm(): void {
+    if (this.armOn) {
+      // Release the front camera BEFORE ArkUI unmounts the Web component,
+      // same reasoning as toggleHandGesture — prevents hcamera error 15
+      // on the next toggle.
+      try {
+        this.armWebController.runJavaScript(
+          'typeof window.releaseCamera === "function" && window.releaseCamera();'
+        );
+      } catch (err) { /* WebView already gone — harmless */ }
+      this.armOn = false;
+      this.lastGestureLabel = '';
+      this.bridge.setEnvironment(this.envOn && !this.handOn && !this.armOn);
+      // Tear down the WebSocket too — don't leak a live connection to
+      // teach_monitor.py that could still drive the robot while the user
+      // is back in the normal Workshop view.
+      this.robotClient.disconnect();
+      return;
+    }
+    // Front camera is singleton — if hand mode is on, release it first.
+    if (this.handOn) this.toggleHandGesture();
+    this.armOn = true;
+    this.bridge.setEnvironment(false);
+    // Kick off the native WebSocket connect — happens in parallel with
+    // MediaPipe warming up, so by the time the user sees "TRACKING
+    // ARMS…" the ROBOT pill is already LINKED or ACTIVE.
+    this.robotClient.connect();
+    this.lastGestureLabel = '识别中 · 请让上半身进入画面';
+    this.lastGestureAt = Date.now();
+    if (this.gestureHintTimer >= 0) clearTimeout(this.gestureHintTimer);
+    this.gestureHintTimer = setTimeout((): void => {
+      if (this.lastGestureAt <= Date.now() - 3800) this.lastGestureLabel = '';
+      this.gestureHintTimer = -1;
+    }, 4000);
   }
 
   /**
@@ -707,17 +881,47 @@ export struct WorkshopPage {
 
   // ---- analog navigation handlers -----------------------------------
   // Left joystick: dy negative = up = walk forward.
+  // In arm mode — instead of driving the AR camera — the left stick
+  // sends roll/pitch deltas to the robot end-effector via arm.html's
+  // WebSocket bridge. dx → roll (around X), dy → pitch (around Y).
   private onWalkStick(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
+    if (this.armOn) {
+      this.sendArmRot(dx * 0.035, -dy * 0.035, 0);  // dy up (push forward) = pitch up
+      return;
+    }
     this.bridge.walkMove(-dy, dx);
   }
 
   // Right joystick: dx = yaw (rotate horizontally), dy = pitch (rotate
-  // vertically). dy negative (push up) means look up, hence the
-  // negation when forwarding to lookBy.
+  // vertically). In arm mode, dx drives yaw of the robot end-effector.
   private onLookStick(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
+    if (this.armOn) {
+      this.sendArmRot(0, 0, dx * 0.035);  // dy free (could map to gripper later)
+      return;
+    }
     this.bridge.lookBy(dx, -dy);
+  }
+
+  // Joystick tick → RobotClient directly. Native side owns the socket,
+  // so we don't need the runJavaScript round-trip into arm.html. Tick
+  // is ~30 Hz; each delta is ±0.035 rad (~2°) per sample, so a
+  // fully-held deflection sweeps ~60°/s on the robot side.
+  private sendArmRot(droll: number, dpitch: number, dyaw: number): void {
+    if (!this.armOn) return;
+    this.robotClient.sendPhoneRot(droll, dpitch, dyaw);
+  }
+
+  private sendArmEstop(): void {
+    this.robotClient.sendEstop(false);
+    this.lastGestureLabel = '已急停 · 松开手停止跟随';
+    this.lastGestureAt = Date.now();
+    if (this.gestureHintTimer >= 0) clearTimeout(this.gestureHintTimer);
+    this.gestureHintTimer = setTimeout((): void => {
+      this.lastGestureLabel = '';
+      this.gestureHintTimer = -1;
+    }, 2400);
   }
 
   private addPart(entry: PaletteEntry): void {
@@ -779,6 +983,95 @@ export struct WorkshopPage {
     return NebulaColor.textPrimary;
   }
 
+  private armWsDotColor(): string {
+    if (this.armWsClass === 'active') return '#7DFFB5';
+    if (this.armWsClass === 'linked') return '#27C7A3';
+    if (this.armWsClass === 'dead')   return '#FF7777';
+    if (this.armWsClass === 'connecting') return '#FFD700';
+    return NebulaColor.textSecondary;
+  }
+  private fwdCount: number = 0;
+  private forwardRobotCmd(jsonStr: string): void {
+    this.fwdCount++;
+    try {
+      const obj: Record<string, Object> = JSON.parse(jsonStr);
+      const cmd = obj['cmd'] as string;
+      if (this.fwdCount === 1 || this.fwdCount % 30 === 0) {
+        hilog.info(0x1, 'WorkshopArm',
+          'forwardRobotCmd #%{public}d cmd=%{public}s',
+          this.fwdCount, cmd);
+      }
+      if (cmd === 'phone_frame') {
+        const ok = this.robotClient.sendPhoneFrame(
+          Number(obj['sx']) || 0, Number(obj['sy']) || 0, Number(obj['sz']) || 0,
+          Number(obj['wx']) || 0, Number(obj['wy']) || 0, Number(obj['wz']) || 0,
+          Number(obj['vis']) || 0, Number(obj['ts']) || Date.now()
+        );
+        if (this.fwdCount === 1) {
+          hilog.info(0x1, 'WorkshopArm',
+            'first phone_frame routed → sendRaw returned %{public}s', String(ok));
+        }
+      } else if (cmd === 'phone_stop') {
+        this.robotClient.sendPhoneStop();
+      } else if (cmd === 'phone_rot') {
+        this.robotClient.sendPhoneRot(
+          Number(obj['droll']) || 0,
+          Number(obj['dpitch']) || 0,
+          Number(obj['dyaw']) || 0
+        );
+      } else if (cmd === 'estop') {
+        this.robotClient.sendEstop(Boolean(obj['hard']));
+      }
+    } catch (err) {
+      hilog.warn(0x1, 'WorkshopArm', 'bad cmd json: %{public}s',
+        jsonStr.length > 120 ? jsonStr.substring(0, 120) : jsonStr);
+    }
+  }
+
+  private armWsShortLabel(): string {
+    if (this.armWsClass === 'active') return 'ROBOT · ACTIVE';
+    if (this.armWsClass === 'linked') return 'ROBOT · LINKED';
+    if (this.armWsClass === 'dead')   return 'ROBOT · ERR';
+    if (this.armWsClass === 'connecting') return 'ROBOT · CONN';
+    return 'ROBOT · ?';
+  }
+
+  @State private armWsUrlDraft: string = 'ws://172.20.10.2:8765';
+
+  private wsUrlDialogController: CustomDialogController = new CustomDialogController({
+    builder: WsUrlInputDialog({
+      draftRef: (): string => this.armWsUrlDraft,
+      setDraft: (v: string): void => { this.armWsUrlDraft = v; },
+      onConfirm: (url: string): void => { this.applyArmWsUrl(url); }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center,
+    customStyle: true
+  });
+
+  private promptArmWsUrl(): void {
+    this.wsUrlDialogController.open();
+  }
+
+  private applyArmWsUrl(url: string): void {
+    const trimmed = url.trim();
+    if (!/^wss?:\/\//.test(trimmed)) {
+      this.toast('URL 必须以 ws:// 或 wss:// 开头');
+      return;
+    }
+    // Reset the native WS: set new URL, tear down existing socket, open
+    // a fresh one. Silent if armOn is false (no reason to connect until
+    // the user re-enters arm mode).
+    this.robotClient.setUrl(trimmed);
+    this.armWsUrlDraft = trimmed;
+    if (this.armOn) {
+      this.robotClient.disconnect().then((): void => {
+        this.robotClient.connect();
+      });
+    }
+    this.toast('已切到 ' + trimmed);
+  }
+
   // ---------- builders ----------
 
   @Builder topBar() {
@@ -807,6 +1100,53 @@ export struct WorkshopPage {
         .border({ width: 1, color: this.handOn ? NebulaColor.brand : NebulaColor.border })
         .borderRadius(NebulaRadius.tight)
         .onClick((): void => { this.toggleHandGesture(); })
+
+        // 手臂 — VR robotic-arm pose viewer
+        Row({ space: 5 }) {
+          NebulaIcon({
+            name: IconName.Arm, glyphSize: 12, strokeW: 2,
+            color: this.armOn ? '#0B0B0E' : NebulaColor.textSecondary
+          })
+          Text('手臂')
+            .fontSize('11vp')
+            .fontFamily(NebulaFontFace.sans)
+            .fontWeight(this.armOn ? FontWeight.Medium : FontWeight.Regular)
+            .fontColor(this.armOn ? '#0B0B0E' : NebulaColor.textSecondary)
+        }
+        .padding({ top: 7, bottom: 7, left: 10, right: 12 })
+        .backgroundColor(this.armOn ? NebulaColor.brand : '#0B0B0EE6')
+        .border({ width: 1, color: this.armOn ? NebulaColor.brand : NebulaColor.border })
+        .borderRadius(NebulaRadius.tight)
+        .onClick((): void => { this.toggleArm(); })
+
+        // ROBOT · WebSocket 状态 — 只在 arm 模式下显示。颜色映射 arm.html
+        // 里的 CSS class：connecting(黄) / linked(青) / active(绿) / dead(红)。
+        if (this.armOn) {
+          Row({ space: 6 }) {
+            // Filled dot — the eye lands on color, not text, when glancing.
+            Column()
+              .width(8).height(8)
+              .backgroundColor(this.armWsDotColor())
+              .borderRadius(4)
+            Text(this.armWsShortLabel())
+              .fontSize('11vp')
+              .fontFamily(NebulaFontFace.mono)
+              .letterSpacing(1.2)
+              .fontColor(this.armWsDotColor())
+          }
+          .padding({ top: 7, bottom: 7, left: 10, right: 12 })
+          .backgroundColor('#0B0B0EE6')
+          .border({ width: 1, color: this.armWsDotColor() })
+          .borderRadius(NebulaRadius.tight)
+          // Long-press → edit robot WS URL. Useful when the robot's IP
+          // changes (e.g. switching from iPhone hotspot to HarmonyOS
+          // hotspot) — the new URL is persisted in the WebView's
+          // localStorage so it survives arm.html unmount/remount.
+          .gesture(
+            LongPressGesture({ repeat: false, duration: 500 })
+              .onAction((): void => { this.promptArmWsUrl(); })
+          )
+        }
 
         // 体感 — accelerometer flicks
         Row({ space: 5 }) {
@@ -1423,7 +1763,7 @@ export struct WorkshopPage {
       // sees. Skip both the hand-tracking WebView and CameraPreview in
       // that case. Hand-gesture mode still takes priority over the
       // passthrough when env is off — MediaPipe needs getUserMedia.
-      if (this.envOn && !this.handOn) {
+      if (this.envOn && !this.handOn && !this.armOn) {
         // Solid dark fill so that if the WebView loads slowly there's
         // no flash of phone UI beneath the AR canvas.
         Column()
@@ -1489,6 +1829,64 @@ export struct WorkshopPage {
             hilog.warn(0x1, 'WorkshopHandWeb',
               'error %{public}s', e.error.getErrorInfo());
           })
+      } else if (this.armOn) {
+        // Arm-pose WebView — mirror of the hand mode but running
+        // MediaPipe Pose (33 body landmarks). Draws the user's arm
+        // skeleton over the front-camera feed; pushes summary frames
+        // to ArkTS via armBridge.onArms().
+        Web({
+          src: $rawfile('arm.html'),
+          controller: this.armWebController
+        })
+          .width('100%').height('100%')
+          .backgroundColor('#0A0A0C')
+          .javaScriptAccess(true)
+          .domStorageAccess(true)
+          .fileAccess(true)
+          .imageAccess(true)
+          .onlineImageAccess(true)
+          .mediaPlayGestureAccess(false)
+          .mixedMode(MixedMode.All)
+          .horizontalScrollBarAccess(false)
+          .verticalScrollBarAccess(false)
+          .overScrollMode(OverScrollMode.NEVER)
+          .zoomAccess(false)
+          .javaScriptProxy({
+            object: this.armBridge,
+            name: 'armBridge',
+            methodList: ['onArms', 'onArmPose', 'onRobotCmd'],
+            controller: this.armWebController
+          })
+          .onControllerAttached((): void => {
+            try {
+              this.armWebController.registerJavaScriptProxy(
+                this.armBridge, 'armBridge', ['onArms', 'onArmPose', 'onRobotCmd']
+              );
+              this.armWebController.refresh();
+              hilog.info(0x1, 'WorkshopArmWeb', 'proxy re-registered + refreshed');
+            } catch (err) {
+              hilog.warn(0x1, 'WorkshopArmWeb',
+                'proxy re-register failed: %{public}s', JSON.stringify(err));
+            }
+          })
+          .onPermissionRequest((e): void => {
+            try {
+              const req = e.request;
+              if (req !== undefined && req !== null) {
+                const needs: string[] = req.getAccessibleResource();
+                req.grant(needs);
+              }
+            } catch (err) { /* ignore */ }
+          })
+          .onConsole((e): boolean => {
+            hilog.info(0x1, 'WorkshopArmWeb',
+              'console %{public}s', e.message.getMessage());
+            return false;
+          })
+          .onErrorReceive((e): void => {
+            hilog.warn(0x1, 'WorkshopArmWeb',
+              'error %{public}s', e.error.getErrorInfo());
+          })
       } else {
         CameraPreview({ onReady: (ok: boolean): void => { this.cameraOk = ok; } })
       }
@@ -1508,6 +1906,28 @@ export struct WorkshopPage {
       // side and we can tuck the pills much closer to the edge.
       Column() {
         this.topBar()
+        // WS failure detail — only when arm is on AND WS is in a dead
+        // state. Shows the full reason (e.g. "6s handshake timeout")
+        // in a subtle red pill below topBar, without overlapping any
+        // other chrome. Auto-hides when WS recovers.
+        if (this.armOn && this.armWsClass === 'dead' && this.armWsDetail.length > 0) {
+          Column().height(6)
+          Row() {
+            Text(this.armWsDetail)
+              .fontSize('10vp')
+              .fontFamily(NebulaFontFace.mono)
+              .fontColor('#FFB9B9')
+              .letterSpacing(0.5)
+              .maxLines(2)
+              .textAlign(TextAlign.Center)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .backgroundColor('#40101080')
+              .border({ width: 1, color: '#FF777766' })
+              .borderRadius(NebulaRadius.tight)
+          }
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        }
         Column().height(10)
         Row() { this.modeSwitcher() }.justifyContent(FlexAlign.Center).width('100%')
         Blank()
@@ -1533,6 +1953,35 @@ export struct WorkshopPage {
           top: this.landscape ? 70 : 110
         })
         .hitTestBehavior(HitTestMode.Transparent)
+      }
+
+      // 急停 (emergency stop) — only visible in arm mode. Pinned to the
+      // LEFT of screen just above the left joystick so the user's left
+      // thumb can stab it instantly without moving their right hand off
+      // the right joystick (or off the viewfinder when tracking their arm).
+      // Bright red + white ring for unmistakable target. Single-tap sends
+      // a soft estop: stop following, let any in-flight movel finish.
+      if (this.armOn) {
+        Row({ space: 8 }) {
+          NebulaIcon({
+            name: IconName.Close, glyphSize: 16, strokeW: 2.8, color: '#FFFFFF'
+          })
+          Text('急停')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+            .letterSpacing(4)
+        }
+        .padding({ left: 18, right: 22, top: 14, bottom: 14 })
+        .backgroundColor('#E02424')
+        .border({ width: 2, color: '#FFFFFFCC' })
+        .borderRadius(999)
+        .shadow({ radius: 18, color: '#E02424AA', offsetX: 0, offsetY: 4 })
+        .position({
+          left: this.landscape ? 64 : NebulaSpace.md,
+          bottom: this.landscape ? 140 : 290
+        })
+        .onClick((): void => { this.sendArmEstop(); })
       }
 
       // Left navigation joystick — XZ translation in the camera's local

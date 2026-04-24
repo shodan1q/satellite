@@ -50,6 +50,7 @@ export class IconName {
   static readonly Rotate: string = 'rotate';
   static readonly Hand: string = 'hand';
   static readonly Motion: string = 'motion';
+  static readonly Arm: string = 'arm';
 }
 
 @Component

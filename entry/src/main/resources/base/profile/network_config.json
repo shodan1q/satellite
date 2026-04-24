@@ -1,0 +1,20 @@
+{
+  "network-security-config": {
+    "base-config": {
+      "cleartextTrafficPermitted": true
+    },
+    "domain-config": [
+      {
+        "cleartextTrafficPermitted": true,
+        "domains": [
+          { "includeSubdomains": true, "name": "localhost" },
+          { "includeSubdomains": true, "name": "172.20.10.2" },
+          { "includeSubdomains": true, "name": "172.20.10.3" },
+          { "includeSubdomains": true, "name": "172.20.10.5" },
+          { "includeSubdomains": true, "name": "192.168.43.1" },
+          { "includeSubdomains": true, "name": "192.168.43.2" }
+        ]
+      }
+    ]
+  }
+}

@@ -4,7 +4,7 @@
 
 ## `robot/teach_monitor.py`
 
-跑在机械臂主机上（woan a1_r）。提供：
+跑在机械臂主机上（woan a1_s）。提供：
 - 终端键盘控制（`↑↓←→`/`wsr/f/t/g/y/h`）
 - WebSocket 服务（`ws://0.0.0.0:8765`）接受手机发来的 `phone_frame` /
   `phone_rot` / `phone_orient` / `estop` 等命令

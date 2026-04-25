@@ -2,6 +2,8 @@
 
 > ASSEMBLE. POINT. MOVE. -- 在手机里搭一颗卫星，举起手，让真的机械臂跟着你的胳膊动。
 
+![会场模式](docs/images/venue-mode.png)
+
 ---
 
 ## 我们的题目
@@ -55,7 +57,8 @@ VR 内的物体和 VR 外的身体形成闭环。
 - 球形金箔本体 + 蓝色太阳翼 + 高增益天线的精细化卫星模型
 - 12 类组件实时拼装（平台舱、太阳翼、天线、燃料舱、有效载荷、推进器…）
 - 一键爆炸图，每个组件位置一目了然
-- 切换多套 Gaussian Splat 场景作为 AR 背景
+- 切换多套 Gaussian Splat 场景作为 AR 背景（**会场模式** —— Insta360 X4 拍摄、Splatica
+  处理后的实景作为 3D 背景，卫星浮在场景中央，两层独立渲染互不影响）
 
 ### 三种自然交互方式（VR ↔ 现实）
 
@@ -67,6 +70,11 @@ VR 内的物体和 VR 外的身体形成闭环。
 
 三种模式可以同时启用，互不冲突。**急停按钮**永远在屏幕顶部，一按立即冻结。
 
+> ![手臂模式 — 右臂关节追踪 + 急停按钮](docs/images/arm-mode.png)
+>
+> HUD 实时显示左右肘 / 腕角度和动作分类（如 `BOTH ARMS · RAISED-RIGHT`）；
+> 右上角是 ROBOT 状态徽章（连接成功 / 失败一目了然）；红色急停按钮顶在最上层。
+
 ### 手势模式（VR ↔ VR）
 
 - MediaPipe Hands 实时识别手部
@@ -74,11 +82,20 @@ VR 内的物体和 VR 外的身体形成闭环。
 - 握拳拖动 → 抓取并移动卫星位置
 - 双手时计算两手距离做更精细控制
 
+> ![手势模式 — MediaPipe Hands 在镜头里追踪手部 21 个关键点](docs/images/gesture-mode.png)
+>
+> 单手 / 双手识别有不同提示。卫星跟着你的手在画面里漂浮、爆炸、收拢。
+
 ### 科普 / 发现 / 周边
 
 - 经典卫星科普：哈勃、ISS、北斗、伽利略、嘉信（含真实 GLB 模型）
 - 太空轨道实时演示
 - 多端联动：手机/平板/手表 同步火箭设计与控制状态
+
+> 科普页 / 发现页：
+>
+> ![科普 · 火箭/卫星 catalog](docs/images/academy-page.png)
+> ![发现 · 当日天空 + 即将发射](docs/images/discover-page.png)
 
 ---
 
@@ -86,7 +103,7 @@ VR 内的物体和 VR 外的身体形成闭环。
 
 **手机端**：DevEco Studio 打开 satellite/ → 部署到 HarmonyOS NEXT 设备。
 
-**机械臂端**（如有 woan a1_r）：
+**机械臂端**（如有 woan a1_s）：
 ```bash
 ~/.local/bin/micromamba run -n woanarm python tools/robot/teach_monitor.py
 ```
@@ -116,7 +133,7 @@ MIT
 
 - **HarmonyOS · 鸿蒙生态** -- 提供原生设备能力（NetStack、AR Engine、DeviceManager、跨端协同），整套体验只有在鸿蒙系统上才能这么自然地把传感器 / 摄像头 / 多端同步串到一起。
 - **影石 Insta360 X4** -- 让任意空间在几分钟内变成可在手机里走进去的 3D 场景。是我们 AR 工坊"自定义太空背景"流程里不可替代的入口设备。
-- **卧安机械臂（WoanArm a1_r）** -- 7 自由度桌面机械臂 + Python SDK，让"手机里挥手 → 桌上一台真机器人跟着动"这个 demo 从想法变成了实物。
+- **卧安机械臂（WoanArm a1_s）** -- 7 自由度桌面机械臂 + Python SDK，让"手机里挥手 → 桌上一台真机器人跟着动"这个 demo 从想法变成了实物。
 
 ### 其他
 

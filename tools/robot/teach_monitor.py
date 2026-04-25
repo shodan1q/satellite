@@ -13,7 +13,7 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 # ── 机械臂初始化 ──────────────────────────────────────────────
 config = woan.WoanConfig()
 config.device = "/dev/ttyACM0"
-config.robot_model = "a1_r"
+config.robot_model = "a1_s"
 config.version = "A1"
 config.model_description_path = "/home/huan/ArmApi/woan_description"
 
@@ -41,7 +41,7 @@ PHONE_MAX_WRIST_JUMP_M = 0.20
 # 以髋中心为原点），du = 右腕 − 右肩，范围大致 ±0.6m。1:1 基本把机器
 # 人的可达工作空间用满，想小范围试运动先把这里调到 0.5。
 PHONE_GAIN             = 1.0
-# 右臂 a1_r 安装方向 → 映射用户右臂到机器人 TCP。Rough convention（用户
+# 右臂 a1_s 安装方向 → 映射用户右臂到机器人 TCP。Rough convention（用户
 # 面对镜头，MediaPipe world：+x 向用户右、+y 向下、+z 向远离相机）：
 #   user 右  (du_x>0)  → 机器人 Y 负（靠身体一侧）
 #   user 上  (du_y<0)  → 机器人 Z 正

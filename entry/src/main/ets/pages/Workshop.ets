@@ -240,6 +240,7 @@ export struct WorkshopPage {
   private unsubHandGrab: () => void = (): void => {};
   private handWebController: webview.WebviewController = new webview.WebviewController();
   private armWebController: webview.WebviewController = new webview.WebviewController();
+  private splaticaWebController: webview.WebviewController = new webview.WebviewController();
   // Bridge object exposed to the hand-tracking WebView via javaScriptProxy.
   // `this` capture must be stable between mounts, so we lock it in once.
   private handBridge: HandJsBridge = new HandJsBridge();
@@ -510,7 +511,7 @@ export struct WorkshopPage {
       // transparent so the camera feed + landmarks could show through.
       // handOn is already false at this point, so `!this.handOn` is
       // redundant but kept for symmetry with the other call sites.
-      this.bridge.setEnvironment(this.envOn && !this.handOn);
+      this.bridge.setEnvironment(false);  // Splatica iframe 接管背景，三/D 端不再加载本地 splat
       return;
     }
     // Front camera is singleton — if arm mode is on, release it first.
@@ -554,7 +555,7 @@ export struct WorkshopPage {
       } catch (err) { /* WebView already gone — harmless */ }
       this.armOn = false;
       this.lastGestureLabel = '';
-      this.bridge.setEnvironment(this.envOn && !this.handOn && !this.armOn);
+      this.bridge.setEnvironment(false);  // Splatica iframe 接管背景，三/D 端不再加载本地 splat
       // Tear down the WebSocket too — don't leak a live connection to
       // teach_monitor.py that could still drive the robot while the user
       // is back in the normal Workshop view.
@@ -821,35 +822,21 @@ export struct WorkshopPage {
     // setEnvironment() would have been swallowed like the blueprint
     // load was. Hand mode takes precedence (splat canvas must stay
     // transparent so the MediaPipe camera feed shows through).
-    this.bridge.setEnvironment(this.envOn && !this.handOn);
+    this.bridge.setEnvironment(false);  // Splatica iframe 接管背景，三/D 端不再加载本地 splat
   }
 
   private toggleEnvironment(): void {
     this.envOn = !this.envOn;
-    // Effective env = envOn && !handOn. Hand mode always wins over the
-    // splat backdrop because the AR canvas can't be both opaque (for
-    // splat) and transparent (for camera feed) at the same time.
-    this.bridge.setEnvironment(this.envOn && !this.handOn);
-    // ALSO clear/restore the rocket model from the ArkTS side. The
-    // JS-side detach in setEnvironment is the primary hide mechanism,
-    // but using the older clearModel() / setParts() bridge calls here
-    // gives us belt-and-suspenders — these are part of the long-stable
-    // bridge surface, so even if the WebView is running a stale ar.html
-    // (e.g. after a partial hot-reload that skipped rawfile assets),
-    // the satellite still goes away when 空间站 turns on.
+    // 改成 Splatica iframe 后：背景由 Layer-1 的在线 viewer 提供，ar.html
+    // 不再加载本地 120MB ISS .splat。setEnvironment(false) 让卫星始终
+    // 可见，叠在 Splatica 实景之上。
+    this.bridge.setEnvironment(false);
+    this.splatLoading = false;
+    // 切到 会场 时把相机回中心，让卫星出现在屏幕正中（用户希望它"融入
+    // 场景的中间"）。配合默认 explode=0 + 没有载荷偏移，看起来像悬浮
+    // 在拍摄空间的中央。
     if (this.envOn) {
-      this.bridge.clearModel();
-    } else {
-      this.restoreCurrentBlueprint();
-    }
-    // 120 MB ISS splat parse can run several seconds on first toggle —
-    // show the loading overlay until the WebView fires splat:ready (or
-    // splat:failed). Subsequent toggles are instant because the splat
-    // stays loaded; suppress the overlay if it's already in memory.
-    if (this.envOn && !this.handOn && !this.splatReady) {
-      this.splatLoading = true;
-    } else {
-      this.splatLoading = false;
+      this.bridge.recenterCamera();
     }
   }
 
@@ -1290,7 +1277,7 @@ export struct WorkshopPage {
             name: IconName.Orbit, glyphSize: 12, strokeW: 2,
             color: this.envOn ? '#0B0B0E' : NebulaColor.textSecondary
           })
-          Text('空间站')
+          Text('会场')
             .fontSize('11vp')
             .fontFamily(NebulaFontFace.sans)
             .fontWeight(this.envOn ? FontWeight.Medium : FontWeight.Regular)
@@ -1863,13 +1850,87 @@ export struct WorkshopPage {
       // sees. Skip both the hand-tracking WebView and CameraPreview in
       // that case. Hand-gesture mode still takes priority over the
       // passthrough when env is off — MediaPipe needs getUserMedia.
-      if (this.envOn && !this.handOn && !this.armOn) {
-        // Solid dark fill so that if the WebView loads slowly there's
-        // no flash of phone UI beneath the AR canvas.
-        Column()
-          .width('100%').height('100%')
-          .backgroundColor(NebulaColor.bg)
-      } else if (this.handOn) {
+      // Splatica Gaussian-Splat iframe — 永久挂载，关掉 会场 只是隐藏，
+      // 不 unmount，避免下次再开时重新拉一遍场景（首次加载较慢）。
+      // 用 opacity 控制可见性，hitTestBehavior 控制是否接收触摸。
+      // Stack 里它声明在最前面 → 渲染在底层；其他元素（摄像头 / 手势 /
+      // 手臂 webview）在它上面叠加；只有 envOn && !handOn && !armOn 时
+      // 没有上层覆盖，Splatica 才"可见"。
+      Web({
+        src: 'https://app.splatica.com/viewer/iframe_tpl.html?viewerUuid=cc17021d&no_ui=1',
+        controller: this.splaticaWebController
+      })
+        .width('100%').height('100%')
+        .backgroundColor('#020510')
+        .javaScriptAccess(true)
+        .domStorageAccess(true)
+        .fileAccess(true)
+        .imageAccess(true)
+        .onlineImageAccess(true)
+        .mixedMode(MixedMode.All)
+        .horizontalScrollBarAccess(false)
+        .verticalScrollBarAccess(false)
+        .overScrollMode(OverScrollMode.NEVER)
+        .zoomAccess(false)
+        .opacity(this.envOn && !this.handOn && !this.armOn ? 1 : 0)
+        .hitTestBehavior(
+          this.envOn && !this.handOn && !this.armOn
+            ? HitTestMode.Default : HitTestMode.None
+        )
+        .onPageEnd((): void => {
+          // Splatica 的 no_ui=1 干掉了底部 nav 按钮，但右上角的 +
+          // (zoom/settings) 还在。用 JS 巡查只隐藏"右上角小尺寸的浮动
+          // 元素"，明确跳过 canvas 自身和它的祖先链路，避免之前那种
+          // "把场景也藏没"的误伤。500ms 一次保证 lazy-mount 的元素也
+          // 能被清理。
+          try {
+            this.splaticaWebController.runJavaScript(`
+              (function(){
+                if (window.__satCleanerStarted) return;
+                window.__satCleanerStarted = true;
+                function isCanvasOrAncestor(el) {
+                  var c = document.querySelector('canvas');
+                  if (!c) return false;
+                  if (el === c) return true;
+                  return el.contains(c);
+                }
+                function hideTopRightUI() {
+                  var w = window.innerWidth, h = window.innerHeight;
+                  var nodes = document.querySelectorAll('button, a, div, [role="button"]');
+                  for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    if (isCanvasOrAncestor(el)) continue;
+                    var cs = window.getComputedStyle(el);
+                    if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
+                    var r = el.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    // 右上角范围：上 18% 高度内、右 22% 宽度内
+                    var inTopRight = r.top < h * 0.18 && r.right > w * 0.78;
+                    var isSmall = r.width < 120 && r.height < 120;
+                    if (inTopRight && isSmall) {
+                      el.style.setProperty('display', 'none', 'important');
+                    }
+                  }
+                }
+                hideTopRightUI();
+                setInterval(hideTopRightUI, 500);
+              })();
+            `);
+          } catch (_) {}
+        })
+        .onConsole((e): boolean => {
+          hilog.info(0x1, 'WorkshopSplatica',
+            'console %{public}s', e.message.getMessage());
+          return false;
+        })
+        .onErrorReceive((e): void => {
+          hilog.warn(0x1, 'WorkshopSplatica',
+            'error %{public}s', e.error.getErrorInfo());
+        })
+
+      // envOn 模式下背景由上面那个永久挂载的 Splatica iframe 显示，
+      // 这里只在 hand / arm / 普通模式时各自渲染对应背景层。
+      if (this.handOn) {
         Web({
           src: $rawfile('hand.html'),
           controller: this.handWebController
@@ -1987,7 +2048,9 @@ export struct WorkshopPage {
             hilog.warn(0x1, 'WorkshopArmWeb',
               'error %{public}s', e.error.getErrorInfo());
           })
-      } else {
+      } else if (!this.envOn) {
+        // 普通 AR 模式才需要摄像头透视；envOn 时背景已由永久挂载的
+        // Splatica iframe 提供，不要再 unmount 它去启动相机。
         CameraPreview({ onReady: (ok: boolean): void => { this.cameraOk = ok; } })
       }
 

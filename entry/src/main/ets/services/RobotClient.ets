@@ -302,6 +302,19 @@ export class RobotClient {
     );
   }
 
+  /**
+   * 绝对姿态（来自传感器模式）—— 直接覆盖 robot rot_delta。
+   * 和 sendPhoneRot 的区别：rot 是增量累加（摇杆每 tick 加一点），
+   * orient 是绝对值（传感器每 tick 设成手机相对初始姿态的 delta）。
+   */
+  sendPhoneOrient(droll: number, dpitch: number, dyaw: number): void {
+    this.sendRaw(
+      '{"cmd":"phone_orient","droll":' + droll.toFixed(4) +
+      ',"dpitch":' + dpitch.toFixed(4) +
+      ',"dyaw":' + dyaw.toFixed(4) + '}'
+    );
+  }
+
   sendPhoneStop(): void {
     this.sendRaw('{"cmd":"phone_stop"}');
   }

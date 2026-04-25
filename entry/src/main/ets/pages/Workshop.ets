@@ -206,6 +206,11 @@ export struct WorkshopPage {
   // of hand mode: front camera + landmark overlay of shoulders/elbows/
   // wrists. Mutually exclusive with 手势 (they share the front camera).
   @State private armOn: boolean = false;
+  // "姿态" — phone tilt (DeviceMotion) → robot end-effector orientation.
+  // Independent of armOn — no camera needed. Auto-connects RobotClient.
+  // First sample after toggle becomes the neutral pose; subsequent
+  // tilts drive the TCP rotation as a delta from that neutral.
+  @State private sensorOn: boolean = false;
   // Robot WebSocket status — mirrored from RobotClient.onStatus so the
   // topBar can render a visible badge. 'idle' before arm mode is
   // opened; after opening, cycles through connecting/linked/active/dead.
@@ -249,6 +254,16 @@ export struct WorkshopPage {
   private unsubMotion: () => void = (): void => {};
   private unsubSync: () => void = (): void => {};
   private unsubBus: () => void = (): void => {};
+  private unsubSensorRobot: () => void = (): void => {};
+  // Captured on first DeviceMotion sample after sensor mode is enabled —
+  // serves as the "neutral" orientation. Subsequent samples report the
+  // delta from this neutral, so user holding the phone in any pose at
+  // toggle-on-time = "robot at home", and tilting from there drives the
+  // robot. Avoids fighting the user with absolute compass heading.
+  private sensorBaseYaw: number = 0;
+  private sensorBasePitch: number = 0;
+  private sensorBaseRoll: number = 0;
+  private sensorBaseSet: boolean = false;
 
   aboutToAppear(): void {
     // AR Workshop runs edge-to-edge with rotation enabled — user can hold
@@ -326,6 +341,12 @@ export struct WorkshopPage {
     this.unsubTelemetry();
     this.unsubHand();
     this.unsubHandGrab();
+    this.unsubSensorRobot();
+    // Don't leave the robot in a tilted pose if Workshop is torn down
+    // mid-session — snap back to home rotation, then drop the WS so the
+    // robot's watchdog cleanly finalises.
+    this.robotClient.sendPhoneOrient(0, 0, 0);
+    this.robotClient.disconnect();
     if (this.gestureHintTimer >= 0) { clearTimeout(this.gestureHintTimer); this.gestureHintTimer = -1; }
     this.exitImmersive();
   }
@@ -913,6 +934,66 @@ export struct WorkshopPage {
     this.robotClient.sendPhoneRot(droll, dpitch, dyaw);
   }
 
+  // --------- 姿态 (sensor-tilt control) ---------
+
+  private toggleSensor(): void {
+    if (this.sensorOn) {
+      this.unsubSensorRobot();
+      this.unsubSensorRobot = (): void => {};
+      this.sensorOn = false;
+      this.sensorBaseSet = false;
+      // Snap robot's rotation back to home so the arm doesn't stay tilted.
+      this.robotClient.sendPhoneOrient(0, 0, 0);
+      this.lastGestureLabel = '';
+      return;
+    }
+    // Auto-connect the robot WS so user doesn't need armOn first.
+    this.robotClient.connect();
+    this.sensorOn = true;
+    this.sensorBaseSet = false;
+    this.lastGestureLabel = '姿态模式 · 当前手机倾角=零位';
+    this.lastGestureAt = Date.now();
+    if (this.gestureHintTimer >= 0) clearTimeout(this.gestureHintTimer);
+    this.gestureHintTimer = setTimeout((): void => {
+      if (this.lastGestureAt <= Date.now() - 2800) this.lastGestureLabel = '';
+      this.gestureHintTimer = -1;
+    }, 3000);
+
+    // ~30 Hz, 0.5° dead-band — enough to feel live, not so much that the
+    // robot judders on natural hand tremor.
+    const throttled = new ThrottledMotionListener(
+      (s: MotionSample): void => { this.onMotionForRobot(s); },
+      33, 0.5
+    );
+    this.unsubSensorRobot = DeviceMotion.instance.subscribe(
+      (s: MotionSample): void => { throttled.handle(s); }
+    );
+  }
+
+  // Convert phone tilt to a delta-from-neutral and ship to the robot.
+  // Servo loop:
+  //   first sample → captured as neutral, no movement
+  //   subsequent  → (current − neutral) in radians, sent as phone_orient
+  // Yaw wrapped to [-π, π] to handle compass crossings sanely.
+  private onMotionForRobot(s: MotionSample): void {
+    if (!this.sensorOn) return;
+    if (!this.sensorBaseSet) {
+      this.sensorBaseYaw = s.yaw;
+      this.sensorBasePitch = s.pitch;
+      this.sensorBaseRoll = s.roll;
+      this.sensorBaseSet = true;
+      return;
+    }
+    const DEG2RAD = Math.PI / 180;
+    let dyawDeg = s.yaw - this.sensorBaseYaw;
+    while (dyawDeg > 180) dyawDeg -= 360;
+    while (dyawDeg < -180) dyawDeg += 360;
+    const droll  = (s.roll  - this.sensorBaseRoll)  * DEG2RAD;
+    const dpitch = (s.pitch - this.sensorBasePitch) * DEG2RAD;
+    const dyaw   = dyawDeg * DEG2RAD;
+    this.robotClient.sendPhoneOrient(droll, dpitch, dyaw);
+  }
+
   private sendArmEstop(): void {
     this.robotClient.sendEstop(false);
     this.lastGestureLabel = '已急停 · 松开手停止跟随';
@@ -1147,6 +1228,25 @@ export struct WorkshopPage {
               .onAction((): void => { this.promptArmWsUrl(); })
           )
         }
+
+        // 姿态 — phone-tilt → robot TCP orientation. Independent of
+        // armOn; auto-connects the robot WS when toggled on.
+        Row({ space: 5 }) {
+          NebulaIcon({
+            name: IconName.Rotate, glyphSize: 12, strokeW: 2,
+            color: this.sensorOn ? '#0B0B0E' : NebulaColor.textSecondary
+          })
+          Text('姿态')
+            .fontSize('11vp')
+            .fontFamily(NebulaFontFace.sans)
+            .fontWeight(this.sensorOn ? FontWeight.Medium : FontWeight.Regular)
+            .fontColor(this.sensorOn ? '#0B0B0E' : NebulaColor.textSecondary)
+        }
+        .padding({ top: 7, bottom: 7, left: 10, right: 12 })
+        .backgroundColor(this.sensorOn ? NebulaColor.brand : '#0B0B0EE6')
+        .border({ width: 1, color: this.sensorOn ? NebulaColor.brand : NebulaColor.border })
+        .borderRadius(NebulaRadius.tight)
+        .onClick((): void => { this.toggleSensor(); })
 
         // 体感 — accelerometer flicks
         Row({ space: 5 }) {

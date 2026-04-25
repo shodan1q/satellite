@@ -241,6 +241,12 @@ export struct WorkshopPage {
   private handWebController: webview.WebviewController = new webview.WebviewController();
   private armWebController: webview.WebviewController = new webview.WebviewController();
   private splaticaWebController: webview.WebviewController = new webview.WebviewController();
+  // 在会场模式下用全屏 PanGesture 把屏幕中央的拖动转成对 Splatica iframe
+  // 内部 canvas 的合成 mouse 事件，让 OrbitControls 转动场景。一次拖动
+  // 期间累积偏移；松手清零。
+  private splaticaPanActive: boolean = false;
+  private splaticaPanLastDx: number = 0;
+  private splaticaPanLastDy: number = 0;
   // Bridge object exposed to the hand-tracking WebView via javaScriptProxy.
   // `this` capture must be stable between mounts, so we lock it in once.
   private handBridge: HandJsBridge = new HandJsBridge();
@@ -990,6 +996,91 @@ export struct WorkshopPage {
       this.lastGestureLabel = '';
       this.gestureHintTimer = -1;
     }, 2400);
+  }
+
+  // ── 会场 模式触摸→Splatica iframe 合成事件 ────────────────────
+  // PanGesture 给到一段拖动总偏移；我们把"上次值→本次值"的差当鼠标
+  // 移动量发给 iframe 里的 canvas。
+  // start: 初始化 + 发 mousedown
+  // update: 发 mousemove（按当前累积偏移）
+  // end: 发 mouseup + 清零
+
+  private splaticaPanStart(): void {
+    this.splaticaPanActive = true;
+    this.splaticaPanLastDx = 0;
+    this.splaticaPanLastDy = 0;
+    try {
+      this.splaticaWebController.runJavaScript(
+        this.splaticaInjectScript() +
+        'window.__satMouseDown && window.__satMouseDown();'
+      );
+    } catch (_) {}
+  }
+
+  private splaticaPanUpdate(offsetX: number, offsetY: number): void {
+    if (!this.splaticaPanActive) return;
+    const px = offsetX.toFixed(1);
+    const py = offsetY.toFixed(1);
+    try {
+      this.splaticaWebController.runJavaScript(
+        'window.__satMouseMove && window.__satMouseMove(' + px + ',' + py + ');'
+      );
+    } catch (_) {}
+  }
+
+  private splaticaPanEnd(): void {
+    if (!this.splaticaPanActive) return;
+    this.splaticaPanActive = false;
+    try {
+      this.splaticaWebController.runJavaScript(
+        'window.__satMouseUp && window.__satMouseUp();'
+      );
+    } catch (_) {}
+  }
+
+  // 一次性注入到 Splatica iframe 里的 mouse-event helper。canvas 找一次
+  // 缓存起来；之后每次 mousedown/move/up 直接合成事件，同时 dispatch 到
+  // canvas 和 window（OrbitControls 在 mousedown 后会把 mousemove/up 监听
+  // 挂到 window 上）。
+  private splaticaInjectScript(): string {
+    return `
+      if (!window.__satInit) {
+        window.__satInit = function() {
+          window.__satCanvas = document.querySelector('canvas');
+          if (!window.__satCanvas) return false;
+          var r = window.__satCanvas.getBoundingClientRect();
+          window.__satCx = r.left + r.width / 2;
+          window.__satCy = r.top + r.height / 2;
+          return true;
+        };
+        window.__satFire = function(type, x, y) {
+          if (!window.__satCanvas && !window.__satInit()) return;
+          var c = window.__satCanvas;
+          var mOpts = { clientX: x, clientY: y, button: 0, buttons: 1, bubbles: true, cancelable: true };
+          c.dispatchEvent(new MouseEvent(type, mOpts));
+          var pType = type.replace('mouse', 'pointer');
+          var pOpts = Object.assign({ pointerId: 9999, pointerType: 'mouse', isPrimary: true }, mOpts);
+          try { c.dispatchEvent(new PointerEvent(pType, pOpts)); } catch (e) {}
+          if (type === 'mousemove' || type === 'mouseup') {
+            try { window.dispatchEvent(new MouseEvent(type, mOpts)); } catch (e) {}
+            try { window.dispatchEvent(new PointerEvent(pType, pOpts)); } catch (e) {}
+            try { document.dispatchEvent(new MouseEvent(type, mOpts)); } catch (e) {}
+          }
+        };
+        window.__satMouseDown = function() {
+          if (!window.__satCanvas && !window.__satInit()) return;
+          window.__satFire('mousedown', window.__satCx, window.__satCy);
+        };
+        window.__satMouseMove = function(dx, dy) {
+          if (!window.__satCanvas && !window.__satInit()) return;
+          window.__satFire('mousemove', window.__satCx + dx, window.__satCy + dy);
+        };
+        window.__satMouseUp = function() {
+          if (!window.__satCanvas) return;
+          window.__satFire('mouseup', window.__satCx, window.__satCy);
+        };
+      }
+    `;
   }
 
   private addPart(entry: PaletteEntry): void {
@@ -2062,6 +2153,29 @@ export struct WorkshopPage {
         onAnchor: (e: ArAnchorEvent): void => this.onAnchor(e),
         onSplat: (e: ArSplatEvent): void => this.onSplat(e)
       })
+
+      // Layer 2.5: 会场 模式专属触摸捕获层。一个全屏透明 Stack，挂
+      // PanGesture 把屏幕中央的拖动转发给 Splatica iframe 的 OrbitControls。
+      // 它在 ArViewer 之后声明 → 渲染上叠在卫星上方 → 触摸先到这里，
+      // ArViewer 不再吃掉 drag。chrome 层（topBar / 摇杆 / 急停）在它后
+      // 面声明 → 又叠在它上面 → 这些控件的触摸照样优先生效。
+      if (this.envOn && !this.handOn && !this.armOn) {
+        Stack()
+          .width('100%').height('100%')
+          .backgroundColor(Color.Transparent)
+          .gesture(
+            PanGesture({ direction: PanDirection.All, distance: 1 })
+              .onActionStart((): void => { this.splaticaPanStart(); })
+              .onActionUpdate((event: Object): void => {
+                // 不能直接 (event: GestureEvent) —— 项目里另有 GesturePipeline.GestureEvent
+                // 同名类型遮蔽了 ArkUI 的；用 Object → Record 兜底访问 offset。
+                const e = event as Record<string, number>;
+                this.splaticaPanUpdate(e['offsetX'], e['offsetY']);
+              })
+              .onActionEnd((): void => { this.splaticaPanEnd(); })
+              .onActionCancel((): void => { this.splaticaPanEnd(); })
+          )
+      }
 
       // Layer 3: chrome. System bars are hidden in this page, but in
       // portrait the physical notch / camera cutout still sits at the

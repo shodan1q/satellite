@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "Nebula Core · 多端 3D 火箭工坊 + 爆炸图科普"
+      "value": "喂！星 · 多端 3D 卫星工坊 + 机械臂联动"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "Nebula Core main entry"
+      "value": "喂！星 main entry"
     },
     {
       "name": "EntryAbility_label",
-      "value": "Nebula Core"
+      "value": "喂！星"
     },
     {
       "name": "reason_distributed_datasync",

@@ -527,7 +527,7 @@ export struct AcademyPage {
                   .width(8).height(8)
                   .borderRadius(2)
                   .backgroundColor(this.pendingCardAccent)
-                Text('Nebula Core')
+                Text('喂！星')
                   .fontSize(11)
                   .fontColor('#0C1B33')
                   .fontWeight(FontWeight.Bold)
@@ -587,7 +587,7 @@ export struct AcademyPage {
           .letterSpacing(2.0)
       }
       Blank()
-      Text('星核 · Nebula Core')
+      Text('喂！星')
         .fontSize('13vp')
         .lineHeight('16vp')
         .fontFamily(NebulaFontFace.serif)

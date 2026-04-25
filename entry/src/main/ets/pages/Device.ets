@@ -1,5 +1,5 @@
 /**
- * Device — control panel for 星核 peripherals. Rendered via an ArkWeb
+ * Device — control panel for 喂！星 peripherals. Rendered via an ArkWeb
  * WebView pointing at rawfile/devices/index.html. A small JS bridge
  * (`nebula.readRawfileBase64`) hands the bundled TTFs over to the page
  * so it can register them via the FontFace API; @font-face with

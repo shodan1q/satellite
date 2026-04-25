@@ -27,7 +27,7 @@ export default class EntryAbility extends UIAbility {
       // Mission-control console aesthetic is dark-only.
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     } catch (err) {
-      hilog.error(DOMAIN, 'NebulaCore', 'color mode failed: %{public}s', JSON.stringify(err));
+      hilog.error(DOMAIN, 'WeiXing', 'color mode failed: %{public}s', JSON.stringify(err));
     }
     NebulaSync.instance.init(this.context).then((): void => {
       // If the user granted DISTRIBUTED_DATASYNC in a previous session,
@@ -37,15 +37,15 @@ export default class EntryAbility extends UIAbility {
       Handoff.isPermissionGranted().then((granted: boolean): void => {
         if (granted) {
           NebulaSync.instance.bindSession(this.context).catch((err: Error): void => {
-            hilog.warn(DOMAIN, 'NebulaCore', 'auto bindSession: %{public}s', err.message);
+            hilog.warn(DOMAIN, 'WeiXing', 'auto bindSession: %{public}s', err.message);
           });
         }
       });
     }).catch((err: Error): void => {
-      hilog.warn(DOMAIN, 'NebulaCore', 'NebulaSync init: %{public}s', err.message);
+      hilog.warn(DOMAIN, 'WeiXing', 'NebulaSync init: %{public}s', err.message);
     });
     UserStats.instance.init(this.context).catch((err: Error): void => {
-      hilog.warn(DOMAIN, 'NebulaCore', 'UserStats init: %{public}s', err.message);
+      hilog.warn(DOMAIN, 'WeiXing', 'UserStats init: %{public}s', err.message);
     });
     ModelStore.instance.init(this.context);
     PhoneInfo.instance.start();
@@ -80,7 +80,7 @@ export default class EntryAbility extends UIAbility {
       payload.issuedAt = Date.now();
       wantParam['nebula.handoff.v1'] = JSON.stringify(payload);
     } catch (err) {
-      hilog.warn(DOMAIN, 'NebulaCore', 'onContinue serialise failed');
+      hilog.warn(DOMAIN, 'WeiXing', 'onContinue serialise failed');
     }
     return AbilityConstant.OnContinueResult.AGREE;
   }
@@ -88,13 +88,13 @@ export default class EntryAbility extends UIAbility {
   private applyHandoff(want: Want): void {
     const payload = HandoffPayload.fromWant(want);
     if (payload === null) {
-      hilog.info(DOMAIN, 'NebulaCore', 'applyHandoff: no payload');
+      hilog.info(DOMAIN, 'WeiXing', 'applyHandoff: no payload');
       return;
     }
     // Continuation / deep-link arrivals skip the splash so Index can
     // consume the AppBus events immediately.
     this.initialPage = 'pages/Index';
-    hilog.info(DOMAIN, 'NebulaCore',
+    hilog.info(DOMAIN, 'WeiXing',
       'applyHandoff tag=%{public}s kind=%{public}s rocket=%{public}s',
       payload.syncTag, payload.kind, payload.rocketId);
     if (payload.syncTag === 'sync') {
@@ -117,7 +117,7 @@ export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     windowStage.loadContent(this.initialPage, (err) => {
       if (err.code) {
-        hilog.error(DOMAIN, 'NebulaCore', 'loadContent failed: %{public}s', JSON.stringify(err));
+        hilog.error(DOMAIN, 'WeiXing', 'loadContent failed: %{public}s', JSON.stringify(err));
         return;
       }
       try {
@@ -131,7 +131,7 @@ export default class EntryAbility extends UIAbility {
           navigationBarContentColor: '#FFFFFF'
         });
       } catch (e) {
-        hilog.warn(DOMAIN, 'NebulaCore', 'fullscreen setup failed');
+        hilog.warn(DOMAIN, 'WeiXing', 'fullscreen setup failed');
       }
     });
   }

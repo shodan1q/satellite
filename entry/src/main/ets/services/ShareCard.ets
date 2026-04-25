@@ -24,7 +24,7 @@ export class CardContent {
   kind: string = '';
   description: string = '';
   specs: CardSpec[] = [];
-  footer: string = '生成自 Nebula Core · HarmonyOS AR 太空工坊';
+  footer: string = '生成自 喂！星 · HarmonyOS AR 太空工坊';
 }
 
 export class ShareResult {

@@ -1,6 +1,6 @@
 /**
- * Nebula Core design tokens — mission-control dark theme, ported from
- * the weixin "喂！星" personal-satellite console. The language is
+ * 喂！星 design tokens — mission-control dark theme, ported from
+ * the weixin personal-satellite console. The language is
  * near-black surfaces, neutral zinc scale text, and a single SpaceX
  * orange-red (#ff4d33) accent.
  *
@@ -114,8 +114,8 @@ export class NebulaFontFace {
   // surfaces, at the cost of a slightly less editorial typeface.
   //
   // Serif stays registered via font.registerFont in Splash.ets — it's
-  // only used on oversized page titles and the "星核 · Nebula Core"
-  // wordmark where system substitution would be most obvious.
+  // only used on oversized page titles and the "喂！星" wordmark where
+  // system substitution would be most obvious.
   static readonly sans: string = 'HarmonyOS Sans';
   static readonly display: string = 'HarmonyOS Sans';
   static readonly serif: string = 'Instrument Serif';

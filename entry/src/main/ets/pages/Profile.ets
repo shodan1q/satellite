@@ -169,7 +169,7 @@ export struct ProfilePage {
           .letterSpacing(2.0)
       }
       Blank()
-      Text('星核 · Nebula Core')
+      Text('喂！星')
         .fontSize('13vp')
         .lineHeight('16vp')
         .fontFamily(NebulaFontFace.serif)

@@ -15,7 +15,7 @@ const SPLASH_DOMAIN: number = 0x0000;
  * like the console header in the reference screenshots.
  *
  * Stage B (cross-fade) — the stage-A chrome fades out and the
- * existing "星 核" Instrument-Serif hero + hairline progress bar fade
+ * existing "喂！星" Instrument-Serif hero + hairline progress bar fade
  * in, running for another ~2s before routing to Index.
  *
  * The 3D splash.html scene stays mounted underneath both stages as a
@@ -129,40 +129,8 @@ struct Splash {
 
   @Builder stageABrand() {
     Column() {
-      Row({ space: 14 }) {
-        // Weixin "Subtract" mark — inverted to white to read on the
-        // dark starfield. Matches the reference screenshot's top-left
-        // console logo.
-        Image($rawfile('icons/weixin-mark.svg'))
-          .width(40).height(34)
-          .fillColor('#FAFAFA')
-          .opacity(this.revealMark ? 0.95 : 0)
-          .translate({ x: this.revealMark ? 0 : -8 })
-          .animation({ duration: 700, curve: Curve.FastOutSlowIn })
-        // Hairline divider between mark and title, just like the
-        // weixin console header.
-        Column().width(1).height(40).backgroundColor('#FFFFFF33')
-          .opacity(this.revealMark ? 1 : 0)
-          .animation({ duration: 700, curve: Curve.FastOutSlowIn })
-        Column({ space: 6 }) {
-          Text('PERSONAL SATELLITE')
-            .fontSize(11).fontWeight(600)
-            .letterSpacing(3.6).fontColor('#A1A1AA')
-            .fontFamily('Space Grotesk')
-            .opacity(this.revealEyebrow ? 1 : 0)
-            .translate({ y: this.revealEyebrow ? 0 : -6 })
-            .animation({ duration: 700, curve: Curve.FastOutSlowIn })
-          Text('个人卫星控制台')
-            .fontSize(22).fontWeight(600)
-            .letterSpacing(-0.2).fontColor('#FAFAFA')
-            .opacity(this.revealChineseTitle ? 1 : 0)
-            .translate({ y: this.revealChineseTitle ? 0 : 10 })
-            .animation({ duration: 800, curve: Curve.FastOutSlowIn })
-        }
-        .alignItems(HorizontalAlign.Start)
-      }
-      .alignItems(VerticalAlign.Center)
-
+      // 顶部 brand mark + 标题区已删除 —— 改由 splash.html 的视频自身
+      // 来承载品牌视觉。Stage A 现在只剩底部的 meta strip。
       Blank()
 
       // Bottom-left meta strip — version + boot timestamp, small mono
@@ -192,20 +160,16 @@ struct Splash {
     .padding({ left: 28, right: 28, top: 64, bottom: 52 })
   }
 
-  // ---- Stage B: 星·核 hero + progress (existing) ----------------------
+  // ---- Stage B: 喂！星 hero + progress (existing) --------------------
 
   @Builder stageBHero() {
     Column() {
-      Text('星   核')
-        .fontSize(60).fontWeight(200)
-        .letterSpacing(8).fontColor('#FFFFFF')
-        .opacity(this.revealTitle ? 1 : 0)
-        .translate({ y: this.revealTitle ? 0 : 20 })
-        .animation({ duration: 950, curve: Curve.FastOutSlowIn })
+      // Brand mark 由 splash.html 的视频自身展现，ArkTS 这一层不再重复
+      // 叠图标 / 大字。只保留下面的副标题 + slogan 作为文字浮层。
 
       Row() {
         Column() {}.width(28).height(1).backgroundColor('#FFFFFF66')
-        Text('NEBULA CORE')
+        Text('WEI · XING')
           .fontSize(12).fontWeight(500)
           .letterSpacing(6).fontColor('#FFFFFFD9')
           .fontFamily('Space Grotesk')

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-<title>Nebula Core</title>
+<title>喂！星</title>
 <style>
   html, body {
     margin: 0; padding: 0;
@@ -22,9 +22,9 @@
     position: fixed; inset: 0; z-index: 0;
     background: #02040F;
   }
-  /* Real rocket launch footage (NASA MMS mission) full-bleed. We fade it
-     in once the video is ready so the swap from gradient to launch flame
-     feels designed instead of a pop. */
+  /* 喂！星 brand splash clip full-bleed. We fade it in once the video
+     is ready so the swap from gradient to footage feels designed
+     instead of a pop. */
   #launch {
     position: fixed;
     top: 0; left: 0;
@@ -85,12 +85,8 @@
   disablepictureinpicture
   disableremoteplayback
 >
-  <!-- Local clip: NASA MMS satellite boom-deployment in orbit,
-       pre-trimmed to the 10-second deployment sequence at 720p.
-       Public domain, 3.0MB. -->
+  <!-- 喂！星 brand splash clip (~1.7MB, 本地). -->
   <source src="./media/launch.mp4" type="video/mp4" />
-  <!-- CDN fallback in case resource:// video playback is rejected. -->
-  <source src="https://images-assets.nasa.gov/video/GSFC_20141121_MMS_m11702_launch/GSFC_20141121_MMS_m11702_launch~medium.mp4" type="video/mp4" />
 </video>
 
 <div id="vignette"></div>
@@ -116,8 +112,7 @@
   video.addEventListener('loadedmetadata', () => {
     log('meta ' + video.videoWidth + 'x' + video.videoHeight +
         ' dur=' + video.duration.toFixed(1) + 's');
-    // Video is pre-trimmed (10s) to the MMS satellite boom-deployment
-    // sequence at 1280x720, so no seek needed.
+    // 喂！星 brand clip — pre-trimmed, plays from start.
   });
 
   video.addEventListener('loadeddata', () => {

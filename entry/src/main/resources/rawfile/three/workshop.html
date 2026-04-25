@@ -341,84 +341,376 @@
     return g;
   }
 
+  // ── Solar panel — framed array on a truss boom, deeper material vibes ──
   function makeSolar(part, side) {
     const g = new THREE.Group();
-    const panel = new THREE.Mesh(
-      new THREE.BoxGeometry(1.6, part.height, 0.04),
-      new THREE.MeshStandardMaterial({ color: 0x1F3A8A, roughness: 0.3, metalness: 0.6 })
+    const panelW = 1.6, panelH = part.height, panelD = 0.04;
+
+    // 1) Aluminium frame (silver) — slightly larger than the cells, gives
+    //    an outline that reads as a real spacecraft panel rather than a
+    //    flat blue rectangle floating in space.
+    const frameMat = new THREE.MeshStandardMaterial({
+      color: 0xC8CDD8, roughness: 0.4, metalness: 0.85
+    });
+    const frame = new THREE.Mesh(
+      new THREE.BoxGeometry(panelW + 0.06, panelH + 0.06, panelD),
+      frameMat
     );
-    panel.castShadow = true;
-    g.add(panel);
-    // cells
-    const cells = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.48, part.height * 0.9),
-      cellsMaterial()
+    frame.castShadow = true;
+    g.add(frame);
+
+    // 2) Cell sheet — slightly inset, double-sided so backlight shows
+    //    a hint of dark blue from behind too.
+    const cellMat = cellsMaterial();
+    const cellsFront = new THREE.Mesh(
+      new THREE.PlaneGeometry(panelW - 0.04, panelH - 0.04), cellMat
     );
-    cells.position.z = 0.021;
-    g.add(cells);
-    g.position.x = side === 'left' ? -1.3 : 1.3;
-    g.rotation.z = side === 'left' ? -Math.PI/2 : Math.PI/2;
+    cellsFront.position.z = panelD * 0.55;
+    g.add(cellsFront);
+    const cellsBack = new THREE.Mesh(
+      new THREE.PlaneGeometry(panelW - 0.04, panelH - 0.04),
+      new THREE.MeshStandardMaterial({
+        color: 0x0A1235, roughness: 0.7, metalness: 0.2, side: THREE.BackSide
+      })
+    );
+    cellsBack.position.z = -panelD * 0.55;
+    cellsBack.rotation.y = Math.PI;
+    g.add(cellsBack);
+
+    // 3) Cross-bracing (frame ribs every panelH/3) — visible structural
+    //    detail when you look up close.
+    const ribMat = new THREE.MeshStandardMaterial({
+      color: 0xA0A6B5, roughness: 0.5, metalness: 0.7
+    });
+    const ribCount = 3;
+    for (let i = 1; i <= ribCount; i++) {
+      const yPos = -panelH / 2 + (panelH * i) / (ribCount + 1);
+      const rib = new THREE.Mesh(
+        new THREE.BoxGeometry(panelW - 0.02, 0.015, panelD * 0.7), ribMat
+      );
+      rib.position.set(0, yPos, 0);
+      g.add(rib);
+    }
+
+    // 4) Deployment boom — instead of the panel growing out of nothing,
+    //    a slim truss connects panel root to where the bus sits. Adds
+    //    real "deployed" silhouette.
+    const boomLen = 0.65;
+    const boomMat = new THREE.MeshStandardMaterial({
+      color: 0xDDE2EC, roughness: 0.35, metalness: 0.85
+    });
+    const boom = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.025, 0.025, boomLen, 8), boomMat
+    );
+    // Hinge end (toward bus) — small joint.
+    const hinge = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 0.06, 16), ribMat
+    );
+    hinge.rotation.z = Math.PI / 2;
+    // Position boom + hinge so panel is offset 0.5 + boomLen/2 from bus.
+    boom.position.x = -(panelW / 2 + boomLen / 2);
+    boom.rotation.z = Math.PI / 2;
+    hinge.position.x = -(panelW / 2 + boomLen + 0.03);
+    g.add(boom, hinge);
+
+    // 5) Container transform — wing extends sideways from bus, hinge
+    //    near bus. Bus origin is at world centre; panel hinge sits at
+    //    bus surface (~0.5 m from centre).
+    const dir = side === 'left' ? -1 : 1;
+    g.position.x = dir * (0.5 + boomLen + panelW / 2);
+    g.scale.x = dir;
+
     g.userData.label = part.display;
     return g;
   }
 
+  // High-detail cell texture — visible bus bars + iridescent micro-tint
+  // so the panel has subtle warm/cool variations instead of one flat blue.
   function cellsMaterial() {
     const c = document.createElement('canvas');
-    c.width = 128; c.height = 512;
+    c.width = 256; c.height = 1024;
     const ctx = c.getContext('2d');
-    ctx.fillStyle = '#132A75'; ctx.fillRect(0,0,128,512);
-    ctx.fillStyle = '#1F4AD2';
-    for (let y = 0; y < 512; y += 20) {
-      for (let x = 0; x < 128; x += 20) {
-        ctx.fillRect(x+2, y+2, 16, 16);
+
+    // Base grad — slight purple→deep blue across the panel.
+    const grad = ctx.createLinearGradient(0, 0, 256, 1024);
+    grad.addColorStop(0, '#0C1E4F');
+    grad.addColorStop(0.5, '#16306D');
+    grad.addColorStop(1, '#0F1F50');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 1024);
+
+    // Cell grid — each "cell" is a soft blue square with a hint of glow.
+    const CELL = 32;
+    for (let y = 0; y < 1024; y += CELL) {
+      for (let x = 0; x < 256; x += CELL) {
+        // Per-cell tone variation.
+        const t = ((x + y) * 13 % 7) / 7;
+        const blue = 60 + Math.floor(t * 40);
+        ctx.fillStyle = `rgb(${30 + (t * 20)}, ${50 + (t * 30)}, ${130 + blue})`;
+        ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4);
+        // Specular highlight (top-left)
+        ctx.fillStyle = 'rgba(180, 200, 255, 0.18)';
+        ctx.fillRect(x + 2, y + 2, CELL - 4, 3);
+        ctx.fillRect(x + 2, y + 2, 3, CELL - 4);
       }
     }
+    // Bus bars — silver vertical stripes connecting cell rows.
+    ctx.fillStyle = '#C8CFE0';
+    for (let x = CELL / 2; x < 256; x += CELL) {
+      ctx.fillRect(x - 1, 0, 1, 1024);
+    }
+    // Cross stringers
+    ctx.fillStyle = 'rgba(200, 210, 230, 0.5)';
+    for (let y = CELL / 2; y < 1024; y += CELL) {
+      ctx.fillRect(0, y, 256, 1);
+    }
+
     const tex = new THREE.CanvasTexture(c);
     tex.encoding = THREE.sRGBEncoding;
-    return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.4, metalness: 0.3 });
+    tex.anisotropy = 4;
+    return new THREE.MeshStandardMaterial({
+      map: tex, roughness: 0.35, metalness: 0.55,
+      emissive: 0x0A1A4A, emissiveIntensity: 0.18
+    });
   }
 
+  // ── Antenna — ribbed parabolic dish + feed horn + 2-axis gimbal ──
   function makeAntenna(part) {
     const g = new THREE.Group();
+    const r = part.radiusBottom;
+
+    // Dish — flatter parabola feel via a deeper open angle, with double
+    // side so back face is visible when off-axis.
     const dish = new THREE.Mesh(
-      new THREE.SphereGeometry(part.radiusBottom, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2.5),
-      new THREE.MeshStandardMaterial({ color: 0xFBFCFE, roughness: 0.3, metalness: 0.3, side: THREE.DoubleSide })
+      new THREE.SphereGeometry(r, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2.8),
+      new THREE.MeshStandardMaterial({
+        color: 0xF6F8FB, roughness: 0.35, metalness: 0.4,
+        side: THREE.DoubleSide,
+        emissive: 0x1A2230, emissiveIntensity: 0.05
+      })
     );
     dish.rotation.x = Math.PI;
     dish.castShadow = true;
     g.add(dish);
+
+    // Ribs — 8 thin meridians on the dish surface for the "real reflector"
+    // look. Cylinders bent along the dish curve approximated as straight
+    // bars from rim to crown — close enough at small dish radii.
+    const ribMat = new THREE.MeshStandardMaterial({
+      color: 0xB8BDC8, roughness: 0.5, metalness: 0.7
+    });
+    const RIBS = 8;
+    for (let i = 0; i < RIBS; i++) {
+      const a = (i / RIBS) * Math.PI * 2;
+      const rib = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.008, 0.008, r * 1.1, 6), ribMat
+      );
+      rib.position.set(Math.cos(a) * r * 0.55, -r * 0.2, Math.sin(a) * r * 0.55);
+      rib.lookAt(0, 0.05, 0);
+      rib.rotateX(Math.PI / 2);
+      g.add(rib);
+    }
+    // Rim ring
+    const rim = new THREE.Mesh(
+      new THREE.TorusGeometry(r * 0.98, 0.012, 6, 48), ribMat
+    );
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = -0.02;
+    g.add(rim);
+
+    // Feed horn at the focal point (above dish centre)
+    const feed = new THREE.Group();
+    const horn = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.07, 0.18, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0xF1C66A, roughness: 0.3, metalness: 0.85
+      })
+    );
+    horn.position.y = -0.09;
+    feed.add(horn);
+    // Three feed support struts
+    const strutMat = new THREE.MeshStandardMaterial({
+      color: 0xB8BDC8, roughness: 0.6, metalness: 0.6
+    });
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      const strut = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.01, 0.01, r * 0.95, 6), strutMat
+      );
+      // Strut from rim to feed centre
+      const sx = Math.cos(a) * r * 0.85;
+      const sz = Math.sin(a) * r * 0.85;
+      strut.position.set(sx / 2, -0.1, sz / 2);
+      strut.lookAt(0, 0, 0);
+      strut.rotateX(Math.PI / 2);
+      g.add(strut);
+    }
+    feed.position.y = -r * 0.18;
+    g.add(feed);
+
+    // 2-axis gimbal at the base — cube + cylinder
+    const gimbal = new THREE.Group();
+    const azCube = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.05, 0.12),
+      new THREE.MeshStandardMaterial({
+        color: 0x2C3A55, roughness: 0.5, metalness: 0.6
+      })
+    );
+    azCube.position.y = -part.height + 0.05;
+    gimbal.add(azCube);
     const stand = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.03, 0.03, part.height, 12),
+      new THREE.CylinderGeometry(0.035, 0.04, part.height - 0.1, 16),
       accentMaterial(part.accent || '#E9A23B')
     );
-    stand.position.y = -part.height/2;
-    g.add(stand);
+    stand.position.y = -part.height / 2;
+    gimbal.add(stand);
+    g.add(gimbal);
+
     g.userData.label = part.display;
     return g;
   }
 
+  // ── Bus — gold-foil MLI core + corner thrusters + radiator fins + sensor ──
   function makeBus(part) {
     const g = new THREE.Group();
+    const w = part.radiusBottom * 1.5;
+    const h = part.height;
+
+    // Core block with gold/silver MLI insulation texture
     const core = new THREE.Mesh(
-      new THREE.BoxGeometry(part.radiusBottom*1.5, part.height, part.radiusBottom*1.5),
-      buildMaterial(part)
+      new THREE.BoxGeometry(w, h, w), busFoilMaterial()
     );
     core.castShadow = true;
     g.add(core);
-    // seams
+
+    // Corner edge bars — kept (they read as structural channels)
     const edgeMat = accentMaterial(part.accent || '#2E6BF6');
-    const bevel = 0.02;
-    const w = part.radiusBottom*1.5, h = part.height;
-    const positions = [
-      [w/2, h/2, 0], [-w/2, h/2, 0], [w/2, -h/2, 0], [-w/2, -h/2, 0]
+    const bevel = 0.025;
+    const corners = [
+      [ w/2, 0,  w/2], [-w/2, 0,  w/2],
+      [ w/2, 0, -w/2], [-w/2, 0, -w/2]
     ];
-    for (const p of positions) {
-      const bar = new THREE.Mesh(new THREE.BoxGeometry(bevel, h, bevel), edgeMat);
-      bar.position.set(p[0], 0, p[2]);
+    for (const p of corners) {
+      const bar = new THREE.Mesh(
+        new THREE.BoxGeometry(bevel, h + 0.01, bevel), edgeMat
+      );
+      bar.position.set(p[0], p[1], p[2]);
       g.add(bar);
     }
+
+    // Top hatch — a slightly raised square panel with a different finish,
+    // reads as docking / sensor mount.
+    const hatchMat = new THREE.MeshStandardMaterial({
+      color: 0x2A3142, roughness: 0.4, metalness: 0.7,
+      emissive: 0x0E1730, emissiveIntensity: 0.1
+    });
+    const hatch = new THREE.Mesh(
+      new THREE.BoxGeometry(w * 0.55, 0.03, w * 0.55), hatchMat
+    );
+    hatch.position.y = h / 2 + 0.015;
+    g.add(hatch);
+    // Lens at hatch centre — sensor / star tracker
+    const lens = new THREE.Mesh(
+      new THREE.CylinderGeometry(w * 0.12, w * 0.12, 0.04, 24),
+      new THREE.MeshStandardMaterial({
+        color: 0x111B30, roughness: 0.15, metalness: 0.95,
+        emissive: 0x152040, emissiveIntensity: 0.4
+      })
+    );
+    lens.position.y = h / 2 + 0.04;
+    g.add(lens);
+
+    // Bottom: 4 corner RCS thruster nozzles — small cone+tube each, reads
+    // as a real attitude-control system.
+    const nozMat = new THREE.MeshStandardMaterial({
+      color: 0x9C7536, roughness: 0.45, metalness: 0.85
+    });
+    const nozOff = w * 0.42;
+    const nozzleSpots = [
+      [ nozOff, -h/2,  nozOff], [-nozOff, -h/2,  nozOff],
+      [ nozOff, -h/2, -nozOff], [-nozOff, -h/2, -nozOff]
+    ];
+    for (const p of nozzleSpots) {
+      const noz = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.06, 0.08, 12), nozMat
+      );
+      noz.position.set(p[0], p[1] - 0.04, p[2]);
+      g.add(noz);
+    }
+
+    // Radiator fins — two thin panels on +Z and -Z faces
+    const radMat = new THREE.MeshStandardMaterial({
+      color: 0xE8EBF1, roughness: 0.55, metalness: 0.4,
+      emissive: 0x222630, emissiveIntensity: 0.05
+    });
+    for (const z of [w / 2 + 0.012, -(w / 2 + 0.012)]) {
+      const rad = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.85, h * 0.7, 0.02), radMat
+      );
+      rad.position.set(0, 0, z);
+      g.add(rad);
+      // Add 6 horizontal grooves visualised as thin dark stripes
+      for (let i = -2; i <= 2; i++) {
+        const groove = new THREE.Mesh(
+          new THREE.BoxGeometry(w * 0.83, 0.012, 0.01),
+          new THREE.MeshStandardMaterial({ color: 0x60697A, roughness: 0.6, metalness: 0.4 })
+        );
+        groove.position.set(0, i * (h * 0.12), z + (z > 0 ? 0.011 : -0.011));
+        g.add(groove);
+      }
+    }
+
     g.userData.label = part.display;
     return g;
+  }
+
+  // Gold-foil MLI (multi-layer insulation) procedural texture — the
+  // crinkled gold look that ~every spacecraft has, instead of plain
+  // gray box paint.
+  function busFoilMaterial() {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 256;
+    const ctx = c.getContext('2d');
+    // Base gold
+    const grad = ctx.createLinearGradient(0, 0, 256, 256);
+    grad.addColorStop(0, '#D9B25C');
+    grad.addColorStop(0.5, '#F0C36B');
+    grad.addColorStop(1, '#B8923E');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+    // Crinkle — random bright/dark streaks
+    for (let i = 0; i < 600; i++) {
+      const x = Math.random() * 256;
+      const y = Math.random() * 256;
+      const len = 8 + Math.random() * 32;
+      const ang = Math.random() * Math.PI;
+      const bright = Math.random() > 0.5;
+      ctx.strokeStyle = bright
+        ? `rgba(255, 230, 160, ${0.10 + Math.random() * 0.18})`
+        : `rgba(80, 50, 20, ${0.10 + Math.random() * 0.18})`;
+      ctx.lineWidth = 0.7 + Math.random() * 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len);
+      ctx.stroke();
+    }
+    // Tape seams — a couple horizontal silver tape strips
+    for (let i = 0; i < 3; i++) {
+      const y = 40 + i * 80 + (Math.random() - 0.5) * 12;
+      ctx.fillStyle = `rgba(200, 200, 220, 0.7)`;
+      ctx.fillRect(0, y, 256, 4);
+      ctx.fillStyle = `rgba(140, 140, 160, 0.4)`;
+      ctx.fillRect(0, y + 3.5, 256, 1);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.encoding = THREE.sRGBEncoding;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 2);
+    tex.anisotropy = 4;
+    return new THREE.MeshStandardMaterial({
+      map: tex, roughness: 0.55, metalness: 0.7,
+      emissive: 0x2A1A05, emissiveIntensity: 0.08
+    });
   }
 
   function buildPartMesh(part) {

@@ -20,7 +20,10 @@ export struct JoystickPad {
   /** Diameter of the outer ring in vp. Thumb size scales from this.
       Named `padSize` (not `size`) because ArkTS reserves `size` on
       CustomComponent — colliding with the CommonAttribute setter. */
-  padSize: number = 92;
+  padSize: number = 84;
+  /** Accent color on touch — defaults to cyan (sat-app brand). Caller
+      can pass '#FF4D33' (brand-orange), '#27C7A3' (mint) etc. */
+  accent: string = '#3FB7FF';
   /** Caller for live samples. Called at ~30 Hz while touched. */
   onChange: (dx: number, dy: number) => void = (): void => {};
 
@@ -57,24 +60,62 @@ export struct JoystickPad {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      // Outer ring — glass disc.
+      // Stacked translucent layers form a soft "depth-well" feel —
+      // closer to the physical glass joysticks on Vision Pro / Apple
+      // gaming controllers than the previous flat disc. Three concentric
+      // circles with progressively darker fills give a vignette without
+      // needing a real radial gradient (ArkTS Circle doesn't expose one).
       Circle()
         .width(this.padSize).height(this.padSize)
-        .fill('#18181BCC')
-        .stroke('#FFFFFF22')
-        .strokeWidth(1)
-      // Inner reference ring (slightly smaller, shows the knob's range).
+        .fill('#0F1115AA')
       Circle()
-        .width(this.padSize * 0.62).height(this.padSize * 0.62)
-        .fill(Color.Transparent)
-        .stroke('#FFFFFF14')
-        .strokeWidth(1)
-      // Draggable thumb.
+        .width(this.padSize * 0.86).height(this.padSize * 0.86)
+        .fill('#0B0D1366')
       Circle()
-        .width(this.padSize * 0.36).height(this.padSize * 0.36)
-        .fill(this.active ? '#FFFFFF' : '#FFFFFFEE')
-        .shadow({ radius: 10, color: '#00000080', offsetX: 0, offsetY: 4 })
+        .width(this.padSize * 0.72).height(this.padSize * 0.72)
+        .fill('#08090E55')
+      // Active-only accent ring — sits *under* the knob, drifts with
+      // it. Subtle, just enough to confirm engagement without the
+      // garish yellow rings the previous design had.
+      if (this.active) {
+        Circle()
+          .width(this.padSize * 0.62).height(this.padSize * 0.62)
+          .fill(this.accent + '22')
+          .translate({ x: this.knobX, y: this.knobY })
+      }
+      // Knob — a soft "off-white" puck with a subtle inner gradient
+      // implied via two stacked circles (cooler highlight on top, warm
+      // shadow at bottom). Reads premium without competing for color
+      // attention with the chrome.
+      Circle()
+        .width(this.padSize * (this.active ? 0.42 : 0.36))
+        .height(this.padSize * (this.active ? 0.42 : 0.36))
+        .fill('#F5F6F8')
+        .shadow({
+          radius: this.active ? 16 : 10,
+          color: '#000000B0',
+          offsetX: 0, offsetY: this.active ? 6 : 4
+        })
         .translate({ x: this.knobX, y: this.knobY })
+      // Inner highlight on the knob — small lighter spot, makes it
+      // feel 3D / spherical instead of pancake-flat.
+      Circle()
+        .width(this.padSize * (this.active ? 0.22 : 0.18))
+        .height(this.padSize * (this.active ? 0.22 : 0.18))
+        .fill('#FFFFFF')
+        .translate({
+          x: this.knobX - this.padSize * 0.05,
+          y: this.knobY - this.padSize * 0.05
+        })
+        .opacity(0.55)
+      // Tiny accent dot at the knob center when active — color signal
+      // without rim noise.
+      if (this.active) {
+        Circle()
+          .width(this.padSize * 0.08).height(this.padSize * 0.08)
+          .fill(this.accent)
+          .translate({ x: this.knobX, y: this.knobY })
+      }
     }
     .width(this.padSize).height(this.padSize)
     .gesture(
